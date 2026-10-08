@@ -22,13 +22,13 @@ export default function Login({ onLoginSuccess }) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4 font-sans">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-blue-800 to-slate-900 flex flex-col justify-center items-center p-4 font-sans">
       <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border border-slate-100">
         <div className="flex items-center justify-center mb-8">
           <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
             <MessageSquare className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-3xl font-black ml-3 text-slate-800 tracking-tight">Docu<span className="text-blue-600">Mind</span></h1>
+          <h1 className="text-3xl font-black ml-3 text-slate-800 tracking-tight">Indicio</h1>
         </div>
         <h2 className="text-xl font-bold text-center text-slate-700 mb-6">Iniciar Sesión</h2>
         {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg mb-4 text-sm font-medium border border-red-100 text-center">{loginError}</div>}
