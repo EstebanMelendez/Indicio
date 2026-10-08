@@ -67,9 +67,9 @@ python create_admin.py
 
 Finalmente, inicia el servidor de desarrollo:
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
-*(El backend debería estar corriendo en `http://localhost:8000`)*
+*(El backend debería estar corriendo en `http://localhost:8000` y accesible desde Docker vía `host.docker.internal`)*
 
 ### 3. Configurar y Levantar el Frontend
 Abre otra terminal y navega a la carpeta del frontend:
@@ -87,6 +87,28 @@ Inicia el servidor de desarrollo de Vite:
 npm run dev
 ```
 *(El frontend debería estar disponible en `http://localhost:5173`)*
+
+---
+
+## 🤖 Automatización y Flujos de Trabajo (n8n)
+
+Indicio Enterprise utiliza **n8n** (incluido en el `docker-compose.yml` en el puerto `5678`) para automatizar la recepción de documentos vía correo electrónico y el envío de notificaciones.
+
+El flujo de trabajo bidireccional está compuesto por dos flujos (workflows) principales que interactúan con la API de Gmail (OAuth2) y el backend de Indicio:
+
+### 1. Flujo de Ingesta (Gmail ➡️ n8n ➡️ Backend)
+Este flujo automatiza la subida de documentos que los usuarios envían por correo.
+1. **Trigger de Gmail**: Escucha constantemente la bandeja de entrada buscando correos nuevos que contengan archivos adjuntos.
+2. **Nodo de Código (Code)**: Extrae de forma dinámica todos los archivos adjuntos (sin importar cuántos vengan en un solo correo) y los divide en elementos individuales (bajo la llave `documento_individual`).
+3. **Nodo de Merge & Login**: n8n se autentica automáticamente en el backend (`/api/auth/login`) usando el usuario de servicio dedicado (`n8n.service@gmail.com`) y combina el token de acceso obtenido con los archivos adjuntos.
+4. **Nodo de Upload**: Realiza una petición `POST` a `/api/documents/upload` por cada archivo adjunto, usando el token de autorización. El backend guarda los archivos por defecto en una carpeta del sistema llamada **"Bandeja n8n"** y comienza el análisis de IA en segundo plano.
+
+### 2. Flujo de Notificaciones (Backend ➡️ n8n ➡️ Gmail)
+Este flujo se encarga de avisar al usuario cuando el procesamiento de IA ha terminado.
+1. **Webhook Trigger**: n8n expone una ruta (`/webhook/document-status`) a la que el backend de FastAPI llama automáticamente cuando termina de clasificar y analizar un documento (ya sea con éxito o si ocurre un error).
+2. **Nodo de Gmail (Send)**: Recibe el payload del backend (que incluye `document_id`, `filename`, `status`, `category` y posibles `error_message`) y redacta un correo electrónico de respuesta notificando los resultados del procesamiento.
+
+*(Para que estos flujos funcionen, es necesario configurar las credenciales de la API de Gmail en la consola de Google Cloud y establecer la variable de entorno `N8N_SERVICE_PASSWORD` en el backend para la creación del usuario de servicio usando `python create_n8n_user.py`).*
 
 ---
 

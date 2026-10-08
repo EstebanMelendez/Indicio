@@ -1,0 +1,47 @@
+===================================================
+GUÍA RÁPIDA: ENCENDIDO Y USO CORRECTO DE INDICIO
+===================================================
+
+Sigue estos pasos en orden para levantar todo el proyecto correctamente:
+
+1. LEVANTAR CONTENEDORES (Docker)
+   ---------------------------------
+   Abre una terminal en la raíz del proyecto y ejecuta:
+   > docker-compose up -d
+   (Esto levanta la Base de Datos PostgreSQL y el servidor de automatización n8n).
+
+2. CONFIGURACIÓN INICIAL DE USUARIOS (Solo la primera vez)
+   ---------------------------------
+   Abre una terminal, entra a la carpeta 'backend', activa el entorno virtual y ejecuta los scripts de creación de usuarios:
+   > cd backend
+   > venv\Scripts\activate
+   > python create_admin.py     (Crea el admin: indicio.admin@gmail.com / admin123)
+   > python create_n8n_user.py  (Crea el usuario para n8n: n8n.service@gmail.com usando la contraseña del .env)
+
+3. ENCENDER EL BACKEND (FastAPI / IA)
+   ---------------------------------
+   En la misma terminal del backend, con el entorno virtual activado:
+   > uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   (El backend quedará escuchando en el puerto 8000, listo para procesar documentos).
+
+4. ENCENDER EL FRONTEND (React / Vite)
+   ---------------------------------
+   Abre una NUEVA terminal, entra a la carpeta 'frontend' y levanta el entorno:
+   > cd frontend
+   > npm run dev
+   (El frontend estará disponible en http://localhost:5173).
+
+5. AUTOMATIZACIONES Y CORREOS (n8n)
+   ---------------------------------
+   Entra a http://localhost:5678 en tu navegador.
+   Asegúrate de que los Workflows de "Ingesta" y "Notificaciones" estén activados (en ON).
+   Esto permitirá que el sistema reciba correos automáticamente y responda al terminar.
+
+6. ACCESO ADMINISTRATIVO
+   ---------------------------------
+   Abre el frontend en tu navegador e inicia sesión con:
+   Email: indicio.admin@gmail.com
+   Pass:  admin123
+   (Aquí podrás ver todos los documentos procesados por la IA).
+
+===================================================

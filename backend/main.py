@@ -235,6 +235,16 @@ async def upload_document(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
+    if not folder_id:
+        from app.models import Folder
+        folder = db.query(Folder).filter(Folder.name == "Bandeja n8n").first()
+        if not folder:
+            folder = Folder(name="Bandeja n8n")
+            db.add(folder)
+            db.commit()
+            db.refresh(folder)
+        folder_id = folder.id
+        
     doc = Document(
         filename=file.filename, 
         file_path=file_path, 
