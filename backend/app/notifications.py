@@ -11,10 +11,12 @@ def notify_document_status(document: Document) -> None:
         return  # integración no configurada todavía — no-op silencioso
 
     payload = {
+        "tenant_id": document.tenant_id,
         "document_id": document.id,
         "filename": document.filename,
         "status": document.status,
         "category": document.category if document.category else None,
+        "extracted_data": document.extracted_data if document.extracted_data else None,
         "error_message": document.error_log if document.status == "Error" else None,
     }
 

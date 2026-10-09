@@ -74,11 +74,11 @@ def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
 
 @app.get("/api/dashboard/stats")
 def get_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    total = db.query(Document).count()
-    processed = db.query(Document).filter(Document.status == "Procesado").count()
-    errors = db.query(Document).filter(Document.status == "Error").count()
+    total = db.query(Document).filter(Document.tenant_id == current_user.tenant_id).count()
+    processed = db.query(Document).filter(Document.tenant_id == current_user.tenant_id, Document.status == "Procesado").count()
+    errors = db.query(Document).filter(Document.tenant_id == current_user.tenant_id, Document.status == "Error").count()
     
-    categories_query = db.query(Document.category, func.count(Document.id)).group_by(Document.category).all()
+    categories_query = db.query(Document.category, func.count(Document.id)).filter(Document.tenant_id == current_user.tenant_id).group_by(Document.category).all()
     categories = {cat if cat else "Sin Clasificar": count for cat, count in categories_query}
     
     return {
@@ -93,7 +93,7 @@ class FolderCreate(BaseModel):
 
 @app.post("/api/folders")
 def create_folder(folder: FolderCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    new_folder = Folder(name=folder.name)
+    new_folder = Folder(name=folder.name, tenant_id=current_user.tenant_id)
     db.add(new_folder)
     db.commit()
     db.refresh(new_folder)
@@ -101,11 +101,11 @@ def create_folder(folder: FolderCreate, db: Session = Depends(get_db), current_u
 
 @app.get("/api/folders")
 def list_folders(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return db.query(Folder).order_by(Folder.created_at.desc()).all()
+    return db.query(Folder).filter(Folder.tenant_id == current_user.tenant_id).order_by(Folder.created_at.desc()).all()
 
 @app.delete("/api/folders/{folder_id}")
 def delete_folder(folder_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    folder = db.query(Folder).filter(Folder.id == folder_id).first()
+    folder = db.query(Folder).filter(Folder.id == folder_id, Folder.tenant_id == current_user.tenant_id).first()
     if not folder:
         raise HTTPException(status_code=404, detail="Carpeta no encontrada")
     db.delete(folder)
@@ -132,7 +132,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         # 2. Clasificación con manejo de errores JSON
         model = genai.GenerativeModel(MODEL_TEXT)
         prompt = f"""Analiza este documento y responde ESTRICTAMENTE en formato JSON válido, sin comillas invertidas ni markdown.
-        Clasifica obligatoriamente en una de estas categorías: "Facturas y Cuentas de Cobro", "Contratos y Acuerdos Legales", "Hojas de Vida / Perfiles Laborales" (o "Sin Clasificar" si no aplica ninguna).
+        Clasifica obligatoriamente en una de estas categorías: "Facturas y Cuentas de Cobro", "Contratos y Acuerdos Legales", "Hojas de Vida / Perfiles Laborales", "Recibos y Comprobantes de Pago", "Reportes y Estados Financieros", "Actas de Reunión", "Manuales y Procedimientos" (o "Sin Clasificar" si no aplica ninguna).
         El esquema debe ser:
         {{
             "category": "nombre de la categoria",
@@ -141,6 +141,10 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 // Si es "Facturas y Cuentas de Cobro": "emisor", "cliente", "numero", "fecha", "total".
                 // Si es "Contratos y Acuerdos Legales": "partes", "objeto", "vigencia", "valor".
                 // Si es "Hojas de Vida / Perfiles Laborales": "postulante", "rol", "anos_experiencia", "competencias", "formacion".
+                // Si es "Recibos y Comprobantes de Pago": "emisor", "receptor", "fecha", "monto", "concepto".
+                // Si es "Reportes y Estados Financieros": "empresa", "periodo", "tipo_reporte", "ingresos", "gastos".
+                // Si es "Actas de Reunión": "fecha", "asistentes", "temas_tratados", "conclusiones".
+                // Si es "Manuales y Procedimientos": "titulo", "departamento", "proposito", "version".
             }}
         }}
         Documento: {raw_text[:8000]}"""
@@ -230,22 +234,23 @@ async def upload_document(
     if size > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="El archivo supera el límite de 10 MB")
 
-    os.makedirs("storage", exist_ok=True)
-    file_path = f"storage/{file.filename}"
+    os.makedirs(f"storage/tenant_{current_user.tenant_id}", exist_ok=True)
+    file_path = f"storage/tenant_{current_user.tenant_id}/{file.filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
     if not folder_id:
         from app.models import Folder
-        folder = db.query(Folder).filter(Folder.name == "Bandeja n8n").first()
+        folder = db.query(Folder).filter(Folder.name == "Bandeja n8n", Folder.tenant_id == current_user.tenant_id).first()
         if not folder:
-            folder = Folder(name="Bandeja n8n")
+            folder = Folder(name="Bandeja n8n", tenant_id=current_user.tenant_id)
             db.add(folder)
             db.commit()
             db.refresh(folder)
         folder_id = folder.id
         
     doc = Document(
+        tenant_id=current_user.tenant_id,
         filename=file.filename, 
         file_path=file_path, 
         mime_type=file.content_type, 
@@ -271,7 +276,7 @@ def list_documents(
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Document)
+    query = db.query(Document).filter(Document.tenant_id == current_user.tenant_id)
     
     if filename:
         query = query.filter(Document.filename.ilike(f"%{filename}%"))
@@ -298,7 +303,7 @@ def list_documents(
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id).first()
+    doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     
@@ -311,14 +316,14 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: Us
 
 @app.get("/api/documents/{doc_id}")
 def get_document_details(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id).first()
+    doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     return doc
 
 @app.get("/api/documents/{doc_id}/download")
 def download_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id).first()
+    doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     
@@ -340,7 +345,7 @@ def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_u
     # Threshold de distancia opcional para evitar ruido: dist_expr < 0.3
     
     base_query = db.query(DocumentChunk.chunk_text, Document.filename, dist_expr.label("dist")) \
-                .join(Document).filter(dist_expr < 0.4)
+                .join(Document).filter(Document.tenant_id == current_user.tenant_id, dist_expr < 0.4)
                 
     if payload.document_ids:
         base_query = base_query.filter(Document.id.in_(payload.document_ids))
