@@ -16,6 +16,7 @@ def notify_document_status(document: Document) -> None:
         "filename": document.filename,
         "status": document.status,
         "category": document.category if document.category else None,
+        "summary": document.summary if document.summary else None,
         "extracted_data": document.extracted_data if document.extracted_data else None,
         "error_message": document.error_log if document.status == "Error" else None,
     }

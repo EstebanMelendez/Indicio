@@ -138,15 +138,38 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
             "category": "nombre de la categoria",
             "summary": "resumen ejecutivo",
             "extracted_data": {{
-                // Si es "Facturas y Cuentas de Cobro": "emisor", "cliente", "numero", "fecha", "total".
+                // Si es "Facturas y Cuentas de Cobro", usa OBLIGATORIAMENTE este esquema:
+                // "emisor_nombre": string (nombre del proveedor o emisor),
+                // "emisor_nit": string (NIT o identificación fiscal, o null si no aparece),
+                // "numero_factura": string (número o consecutivo de factura),
+                // "fecha_emision": string (YYYY-MM-DD o formato original),
+                // "fecha_vencimiento": string (YYYY-MM-DD o null si no especifica),
+                // "moneda": string (ej: "COP", "USD", "EUR"),
+                // "monto_subtotal": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1200000.00),
+                // "monto_impuestos": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 228000.00),
+                // "monto_total": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1428000.00),
+                // "concepto_principal": string (descripción breve del servicio o bien)
+
+                // Si es "Recibos y Comprobantes de Pago":
+                // "emisor_nombre": string,
+                // "receptor_nombre": string,
+                // "numero_recibo": string (o null),
+                // "fecha_pago": string,
+                // "moneda": string,
+                // "monto_total": number (numérico limpio float/int, sin símbolos ni puntos de miles),
+                // "concepto_principal": string,
+                // "metodo_pago": string (ej: "Transferencia", "Efectivo", o null)
+
                 // Si es "Contratos y Acuerdos Legales": "partes", "objeto", "vigencia", "valor".
                 // Si es "Hojas de Vida / Perfiles Laborales": "postulante", "rol", "anos_experiencia", "competencias", "formacion".
-                // Si es "Recibos y Comprobantes de Pago": "emisor", "receptor", "fecha", "monto", "concepto".
                 // Si es "Reportes y Estados Financieros": "empresa", "periodo", "tipo_reporte", "ingresos", "gastos".
                 // Si es "Actas de Reunión": "fecha", "asistentes", "temas_tratados", "conclusiones".
                 // Si es "Manuales y Procedimientos": "titulo", "departamento", "proposito", "version".
             }}
         }}
+
+        REGLA ESTRICTA PARA MONTOS: Los campos 'monto_total', 'monto_subtotal' y 'monto_impuestos' deben ser EXCLUSIVAMENTE de tipo number (flotante o entero), NUNCA cadenas de texto, sin símbolos como '$', sin 'COP'/'USD' y sin separadores de miles con puntos. Ejemplo correcto: 1428000.00. Ejemplo incorrecto: "$ 1.428.000".
+
         Documento: {raw_text[:8000]}"""
         
         response = None
@@ -177,7 +200,26 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         
         doc.category = ai_data.get("category", "Sin Clasificar")
         doc.summary = ai_data.get("summary", "")
-        doc.extracted_data = ai_data.get("extracted_data", {})
+        extracted = ai_data.get("extracted_data", {})
+        
+        # Sanitización defensiva de montos numéricos para garantizar compatibilidad total con n8n
+        if isinstance(extracted, dict):
+            for k in ["monto_total", "monto_subtotal", "monto_impuestos"]:
+                if k in extracted and extracted[k] is not None:
+                    if isinstance(extracted[k], str):
+                        clean_str = extracted[k].replace("$", "").replace("USD", "").replace("COP", "").replace("EUR", "").replace(" ", "").strip()
+                        try:
+                            if "," in clean_str and "." in clean_str:
+                                if clean_str.rfind(",") > clean_str.rfind("."):
+                                    clean_str = clean_str.replace(".", "").replace(",", ".")
+                                else:
+                                    clean_str = clean_str.replace(",", "")
+                            elif "," in clean_str:
+                                clean_str = clean_str.replace(",", ".")
+                            extracted[k] = float(clean_str)
+                        except (ValueError, TypeError):
+                            pass
+        doc.extracted_data = extracted
 
         # 3. Vectorización
         chunks = [raw_text[i:i+700] for i in range(0, len(raw_text), 700)]
@@ -320,6 +362,95 @@ def get_document_details(doc_id: int, db: Session = Depends(get_db), current_use
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     return doc
+
+class DocumentUpdate(BaseModel):
+    folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
+    status: Optional[str] = None
+    extracted_data: Optional[dict] = None
+
+@app.patch("/api/documents/{doc_id}")
+def update_document(
+    doc_id: int, 
+    update_data: DocumentUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    
+    if update_data.folder_name:
+        folder = db.query(Folder).filter(Folder.name == update_data.folder_name, Folder.tenant_id == current_user.tenant_id).first()
+        if not folder:
+            folder = Folder(name=update_data.folder_name, tenant_id=current_user.tenant_id)
+            db.add(folder)
+            db.commit()
+            db.refresh(folder)
+        doc.folder_id = folder.id
+    elif update_data.folder_id is not None:
+        doc.folder_id = update_data.folder_id
+        
+    if update_data.status is not None:
+        doc.status = update_data.status
+    if update_data.extracted_data is not None:
+        doc.extracted_data = update_data.extracted_data
+        
+    db.commit()
+    db.refresh(doc)
+    return {"message": "Documento actualizado exitosamente", "id": doc.id, "folder_id": doc.folder_id, "status": doc.status}
+
+class WorkflowUpdateSchema(BaseModel):
+    target_folder_name: str
+    payment_status: str  # Ej: "APROBADA", "RECHAZADA", "DUPLICADA", "PENDIENTE_APROBACION"
+    notes: Optional[str] = None
+
+@app.patch("/api/documents/{document_id}/workflow-update")
+def update_document_from_n8n(
+    document_id: int,
+    payload: WorkflowUpdateSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from sqlalchemy.orm.attributes import flag_modified
+
+    doc = db.query(Document).filter(
+        Document.id == document_id,
+        Document.tenant_id == current_user.tenant_id
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    # 1. Buscar o crear la carpeta destino automáticamente para ese tenant
+    folder = db.query(Folder).filter(
+        Folder.name == payload.target_folder_name,
+        Folder.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not folder:
+        folder = Folder(name=payload.target_folder_name, tenant_id=current_user.tenant_id)
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
+
+    # 2. Mover documento de carpeta
+    doc.folder_id = folder.id
+
+    # 3. Guardar trazabilidad contable dentro de extracted_data
+    updated_data = dict(doc.extracted_data or {})
+    updated_data["estado_contable"] = payload.payment_status
+    if payload.notes:
+        updated_data["notas_auditoria"] = payload.notes
+    doc.extracted_data = updated_data
+    flag_modified(doc, "extracted_data")
+
+    db.commit()
+    return {
+        "message": "Documento actualizado y movido con éxito",
+        "document_id": doc.id,
+        "folder": folder.name,
+        "estado_contable": payload.payment_status
+    }
 
 @app.get("/api/documents/{doc_id}/download")
 def download_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
