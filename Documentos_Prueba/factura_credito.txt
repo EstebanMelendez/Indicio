@@ -1,0 +1,13 @@
+FACTURA ELECTRONICA DE VENTA No. FAC-777
+Fecha de Emision: 15/10/2026
+Fecha de Vencimiento: 15/11/2026
+Forma de Pago: Credito 30 dias
+
+EMISOR:
+Razon Social: Dell Colombia S.A.S.
+NIT: 830.012.345-6
+
+DETALLE:
+1x Servidor Rack Dell PowerEdge - $ 4,500,000 COP
+
+VALOR TOTAL: $ 4,500,000 COP

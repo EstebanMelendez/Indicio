@@ -7,8 +7,7 @@ logger = logging.getLogger(__name__)
 
 def notify_document_status(document: Document) -> None:
     webhook_url = os.getenv("N8N_WEBHOOK_URL")
-    if not webhook_url:
-        return  # integración no configurada todavía — no-op silencioso
+    invoice_webhook_url = os.getenv("N8N_INVOICE_WEBHOOK_URL", "http://localhost:5678/webhook/invoice-approval")
 
     payload = {
         "tenant_id": document.tenant_id,
@@ -21,11 +20,23 @@ def notify_document_status(document: Document) -> None:
         "error_message": document.error_log if document.status == "Error" else None,
     }
 
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            client.post(webhook_url, json=payload)
-    except httpx.HTTPError as exc:
-        # Una falla notificando NO debe tumbar el pipeline de procesamiento
-        logger.warning(
-            "No se pudo notificar a n8n para el documento %s: %s", document.id, exc
-        )
+    # 1. Notificar al flujo general de notificaciones
+    if webhook_url:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.post(webhook_url, json=payload)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "No se pudo notificar a n8n general para el documento %s: %s", document.id, exc
+            )
+
+    # 2. Si es Factura o Recibo, notificar también al flujo contable de aprobación
+    is_accounting = document.category and any(k in document.category for k in ["Factura", "Recibo"])
+    if invoice_webhook_url and is_accounting and document.status == "Procesado":
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.post(invoice_webhook_url, json=payload)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "No se pudo notificar a n8n facturas para el documento %s: %s", document.id, exc
+            )

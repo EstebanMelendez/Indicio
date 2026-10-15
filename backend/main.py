@@ -129,8 +129,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         if not raw_text or len(raw_text.strip()) < 10:
             raise ValueError("El documento está vacío o no se pudo extraer texto legible.")
         
-        # 2. Clasificación con manejo de errores JSON
-        model = genai.GenerativeModel(MODEL_TEXT)
+        # 2. Clasificación con modelo dinámico y fallback ante límites de cuota (429)
         prompt = f"""Analiza este documento y responde ESTRICTAMENTE en formato JSON válido, sin comillas invertidas ni markdown.
         Clasifica obligatoriamente en una de estas categorías: "Facturas y Cuentas de Cobro", "Contratos y Acuerdos Legales", "Hojas de Vida / Perfiles Laborales", "Recibos y Comprobantes de Pago", "Reportes y Estados Financieros", "Actas de Reunión", "Manuales y Procedimientos" (o "Sin Clasificar" si no aplica ninguna).
         El esquema debe ser:
@@ -171,22 +170,35 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         REGLA ESTRICTA PARA MONTOS: Los campos 'monto_total', 'monto_subtotal' y 'monto_impuestos' deben ser EXCLUSIVAMENTE de tipo number (flotante o entero), NUNCA cadenas de texto, sin símbolos como '$', sin 'COP'/'USD' y sin separadores de miles con puntos. Ejemplo correcto: 1428000.00. Ejemplo incorrecto: "$ 1.428.000".
 
         Documento: {raw_text[:8000]}"""
+
+        candidate_models = list(dict.fromkeys([
+            os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash"),
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite"
+        ]))
         
         response = None
-        for attempt in range(3):
+        last_error = None
+        for model_name in candidate_models:
             try:
-                response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                curr_model = genai.GenerativeModel(model_name)
+                response = curr_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                print(f"[OK] Documento analizado exitosamente con {model_name}")
                 break
             except Exception as e:
-                if "429" in str(e) or "Quota exceeded" in str(e):
-                    if attempt < 2:
-                        print(f"⚠️ Cuota excedida (Rate Limit). Esperando 20 segundos antes de reintentar (Intento {attempt+1}/3)...")
-                        time.sleep(20)
-                        continue
-                raise e
-        
+                last_error = e
+                err_str = str(e)
+                if "429" in err_str or "Quota exceeded" in err_str:
+                    print(f"[WARN] Limite de cuota alcanzado en {model_name}. Cambiando a modelo alternativo...")
+                    continue
+                else:
+                    print(f"[WARN] Error en {model_name}: {err_str[:80]}. Probando alternativo...")
+                    continue
+
         if not response:
-            raise ValueError("No se pudo obtener respuesta de la IA.")
+            raise last_error or ValueError("No se pudo obtener respuesta de la IA.")
             
         raw_response = response.text.strip()
         
@@ -232,7 +244,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 except Exception as e:
                     if "429" in str(e) or "Quota exceeded" in str(e):
                         if attempt < 2:
-                            print(f"⚠️ Cuota excedida (Rate Limit) en embeddings. Esperando 20 segundos... (Intento {attempt+1}/3)")
+                            print(f"[WARN] Cuota excedida en embeddings. Esperando 20s... ({attempt+1}/3)")
                             time.sleep(20)
                             continue
                     raise e
@@ -241,12 +253,12 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 db.add(DocumentChunk(document_id=doc.id, chunk_index=i, chunk_text=chunk, embedding=emb))
 
         doc.status = "Procesado"
-        print(f"✅ Éxito procesando: {filename}")
+        print(f"[OK] Exito procesando: {filename}")
 
     except Exception as e:
         doc.status = "Error"
         doc.error_log = str(e)
-        print(f"❌ Error en {filename}: {str(e)}") 
+        print(f"[ERROR] Error en {filename}: {str(e)}") 
     
     finally:
         db.commit()
@@ -282,14 +294,18 @@ async def upload_document(
         shutil.copyfileobj(file.file, buffer)
         
     if not folder_id:
-        from app.models import Folder
-        folder = db.query(Folder).filter(Folder.name == "Bandeja n8n", Folder.tenant_id == current_user.tenant_id).first()
-        if not folder:
-            folder = Folder(name="Bandeja n8n", tenant_id=current_user.tenant_id)
-            db.add(folder)
-            db.commit()
-            db.refresh(folder)
-        folder_id = folder.id
+        # Solo los documentos recibidos por el bot de n8n van a "Bandeja n8n"
+        if current_user.email == "n8n.service@gmail.com":
+            from app.models import Folder
+            folder = db.query(Folder).filter(Folder.name == "Bandeja n8n", Folder.tenant_id == current_user.tenant_id).first()
+            if not folder:
+                folder = Folder(name="Bandeja n8n", tenant_id=current_user.tenant_id)
+                db.add(folder)
+                db.commit()
+                db.refresh(folder)
+            folder_id = folder.id
+        else:
+            folder_id = None
         
     doc = Document(
         tenant_id=current_user.tenant_id,

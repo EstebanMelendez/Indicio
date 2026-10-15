@@ -1,0 +1,11 @@
+FACTURA ELECTRONICA DE VENTA No. FAC-555
+Fecha: 14/10/2026
+
+EMISOR:
+Razon Social: Suministros Tech SAS
+NIT: 901.444.888-2
+
+DETALLE:
+1x Teclado Mecanico y Mouse Inalambrico - $ 350,000 COP
+
+VALOR TOTAL: $ 350,000 COP
