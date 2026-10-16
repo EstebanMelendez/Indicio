@@ -1,0 +1,404 @@
+{
+  "id": "HRScoutHunter001",
+  "name": "Indicio - Headhunter Autonomo & Scouting",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hr-scouting",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "hr-wh-1",
+      "name": "Webhook HR",
+      "webhookId": "hr-scouting-webhook-001"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "Procesado",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.body.category }}",
+              "rightValue": "Vida",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        240,
+        0
+      ],
+      "id": "hr-if-cat",
+      "name": "Validar Categoria HR"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "score1",
+              "leftValue": "={{ Number($('Webhook HR').first().json.body.extracted_data.match_score) || 0 }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        0
+      ],
+      "id": "hr-if-score",
+      "name": "Filtro Match Score"
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "sendTo": "indicio.admin@gmail.com",
+        "subject": "=[Scouting Top {{ $('Webhook HR').first().json.body.extracted_data.match_score }}%] {{ $('Webhook HR').first().json.body.extracted_data.postulante }} - {{ $('Webhook HR').first().json.body.extracted_data.rol }}",
+        "message": "=<div style=\"font-family: Arial, sans-serif; max-width: 620px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08);\"><div style=\"background: linear-gradient(135deg, #1e293b, #0f172a); color: white; padding: 24px 20px; text-align: center;\"><span style=\"background: #10b981; color: white; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px;\">Candidato Destacado</span><h2 style=\"margin: 12px 0 4px; font-size: 22px;\">🎯 Ficha de Scouting de Talento</h2><p style=\"margin: 0; color: #94a3b8; font-size: 14px;\">DocuMind AI • Reclutamiento Autónomo</p></div><div style=\"padding: 24px; background: #ffffff;\"><div style=\"display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 16px;\"><div><h3 style=\"margin: 0; color: #0f172a; font-size: 20px;\">{{ $('Webhook HR').first().json.body.extracted_data.postulante }}</h3><p style=\"margin: 4px 0 0; color: #64748b; font-size: 15px; font-weight: 500;\">💼 {{ $('Webhook HR').first().json.body.extracted_data.rol }}</p></div><div style=\"text-align: center; background: #ecfdf5; border: 2px solid #10b981; border-radius: 12px; padding: 8px 16px;\"><div style=\"font-size: 26px; font-weight: 900; color: #047857;\">{{ $('Webhook HR').first().json.body.extracted_data.match_score }}%</div><div style=\"font-size: 11px; font-weight: bold; color: #059669; text-transform: uppercase;\">Match Score</div></div></div><table style=\"width: 100%; border-collapse: collapse; margin-bottom: 18px;\"><tr><td style=\"padding: 8px 0; color: #64748b; font-size: 14px;\">⏳ <b>Experiencia:</b></td><td style=\"padding: 8px 0; color: #0f172a; font-size: 14px; text-align: right;\">{{ $('Webhook HR').first().json.body.extracted_data.anos_experiencia }} años corporativos</td></tr><tr><td style=\"padding: 8px 0; color: #64748b; font-size: 14px;\">📍 <b>Ubicación:</b></td><td style=\"padding: 8px 0; color: #0f172a; font-size: 14px; text-align: right;\">{{ $('Webhook HR').first().json.body.extracted_data.contacto_ubicacion || 'No especificada' }}</td></tr><tr><td style=\"padding: 8px 0; color: #64748b; font-size: 14px;\">📞 <b>Contacto:</b></td><td style=\"padding: 8px 0; color: #0f172a; font-size: 14px; text-align: right;\">{{ $('Webhook HR').first().json.body.extracted_data.contacto_telefono || 'No disponible' }}</td></tr><tr><td style=\"padding: 8px 0; color: #64748b; font-size: 14px;\">🎓 <b>Formación:</b></td><td style=\"padding: 8px 0; color: #0f172a; font-size: 14px; text-align: right;\">{{ $('Webhook HR').first().json.body.extracted_data.formacion || 'No especificada' }}</td></tr></table><div style=\"background: #f8fafc; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 4px; margin-bottom: 18px;\"><div style=\"font-size: 12px; font-weight: bold; color: #3b82f6; text-transform: uppercase; margin-bottom: 4px;\">Resumen Ejecutivo Gemini IA</div><div style=\"font-size: 14px; color: #334155; line-height: 1.5;\">{{ $('Webhook HR').first().json.body.extracted_data.resumen_scouting || $('Webhook HR').first().json.body.summary }}</div></div><div style=\"margin-bottom: 20px;\"><div style=\"font-size: 13px; font-weight: bold; color: #475569; margin-bottom: 8px;\">🛠️ Competencias y Tecnologías:</div><div style=\"color: #0284c7; font-size: 13px; line-height: 1.6;\">{{ Array.isArray($('Webhook HR').first().json.body.extracted_data.competencias) ? $('Webhook HR').first().json.body.extracted_data.competencias.join(' • ') : $('Webhook HR').first().json.body.extracted_data.competencias }}</div></div><hr style=\"border: none; border-top: 1px solid #f1f5f9; margin: 20px 0;\"><p style=\"font-size: 14px; color: #475569; text-align: center; margin: 0 0 8px;\">Por favor seleccione una acción con los botones de abajo:</p></div></div>",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Aprobar para Entrevista",
+            "disapproveLabel": "Pasar a Reserva"
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        760,
+        -100
+      ],
+      "id": "hr-gmail-approval",
+      "name": "Ficha Scouting en GMAIL",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "WDGcEtyFdnMzlFFU",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c-appr",
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1000,
+        -100
+      ],
+      "id": "hr-if-decision",
+      "name": "Evaluar Decision HR"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/auth/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"email\": \"n8n.service@gmail.com\",\n  \"password\": \"n8n_secure_pwd_2026_xyz\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1240,
+        -200
+      ],
+      "id": "hr-login-appr",
+      "name": "Login HR Aprobado"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://host.docker.internal:8000/api/documents/{{ $('Webhook HR').first().json.body.document_id }}/workflow-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"target_folder_name\": \"Candidatos Seleccionados\",\n  \"payment_status\": \"ENTREVISTA_PROGRAMADA\",\n  \"notes\": \"Candidato sobresaliente preseleccionado para entrevista técnica\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1480,
+        -200
+      ],
+      "id": "hr-move-selected",
+      "name": "Mover a Candidatos Seleccionados"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/auth/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"email\": \"n8n.service@gmail.com\",\n  \"password\": \"n8n_secure_pwd_2026_xyz\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1240,
+        0
+      ],
+      "id": "hr-login-reserva",
+      "name": "Login HR Reserva"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://host.docker.internal:8000/api/documents/{{ $('Webhook HR').first().json.body.document_id }}/workflow-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"target_folder_name\": \"Banco de Talentos\",\n  \"payment_status\": \"EN_RESERVA\",\n  \"notes\": \"Candidato archivado en reserva por decisión de selección\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1480,
+        0
+      ],
+      "id": "hr-move-reserva-dec",
+      "name": "Mover a Banco de Talentos (Decision)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/auth/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"email\": \"n8n.service@gmail.com\",\n  \"password\": \"n8n_secure_pwd_2026_xyz\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        760,
+        160
+      ],
+      "id": "hr-login-low",
+      "name": "Login HR Low Score"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://host.docker.internal:8000/api/documents/{{ $('Webhook HR').first().json.body.document_id }}/workflow-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"target_folder_name\": \"Banco de Talentos\",\n  \"payment_status\": \"EN_RESERVA\",\n  \"notes\": \"Archivado automáticamente en reserva (Match Score menor a 80)\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1000,
+        160
+      ],
+      "id": "hr-move-reserva-auto",
+      "name": "Mover a Banco de Talentos (Auto)"
+    }
+  ],
+  "connections": {
+    "Webhook HR": {
+      "main": [
+        [
+          {
+            "node": "Validar Categoria HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Categoria HR": {
+      "main": [
+        [
+          {
+            "node": "Filtro Match Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtro Match Score": {
+      "main": [
+        [
+          {
+            "node": "Ficha Scouting en GMAIL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Login HR Low Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ficha Scouting en GMAIL": {
+      "main": [
+        [
+          {
+            "node": "Evaluar Decision HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar Decision HR": {
+      "main": [
+        [
+          {
+            "node": "Login HR Aprobado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Login HR Reserva",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login HR Aprobado": {
+      "main": [
+        [
+          {
+            "node": "Mover a Candidatos Seleccionados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login HR Reserva": {
+      "main": [
+        [
+          {
+            "node": "Mover a Banco de Talentos (Decision)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login HR Low Score": {
+      "main": [
+        [
+          {
+            "node": "Mover a Banco de Talentos (Auto)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

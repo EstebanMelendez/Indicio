@@ -2,6 +2,7 @@ import os
 import shutil
 import json
 import time
+import re
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, Query, BackgroundTasks
@@ -160,7 +161,18 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 // "metodo_pago": string (ej: "Transferencia", "Efectivo", o null)
 
                 // Si es "Contratos y Acuerdos Legales": "partes", "objeto", "vigencia", "valor".
-                // Si es "Hojas de Vida / Perfiles Laborales": "postulante", "rol", "anos_experiencia", "competencias", "formacion".
+                // Si es "Hojas de Vida / Perfiles Laborales", usa OBLIGATORIAMENTE este esquema estructurado:
+                // "postulante": string (nombre completo del candidato),
+                // "rol": string (cargo o especialidad principal, ej: "Desarrollador Fullstack"),
+                // "anos_experiencia": number (años de experiencia laboral corporativa en número, ej: 4 o 1.5),
+                // "competencias": array de strings (tecnologías y habilidades clave, ej: ["React", "Azure", "GitHub", "Python"]),
+                // "formacion": string (educación, certificaciones o nivel académico),
+                // "contacto_telefono": string o null,
+                // "contacto_ubicacion": string o null (ciudad o país),
+                // "match_score": number (puntuación entera o decimal del 0 al 100 evaluando seniority, experiencia y solidez técnica),
+                // "green_flags": array de strings (principales 2 a 3 fortalezas del candidato),
+                // "resumen_scouting": string (síntesis ejecutiva de 2 líneas destacando el potencial del candidato)
+
                 // Si es "Reportes y Estados Financieros": "empresa", "periodo", "tipo_reporte", "ingresos", "gastos".
                 // Si es "Actas de Reunión": "fecha", "asistentes", "temas_tratados", "conclusiones".
                 // Si es "Manuales y Procedimientos": "titulo", "departamento", "proposito", "version".
@@ -214,7 +226,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         doc.summary = ai_data.get("summary", "")
         extracted = ai_data.get("extracted_data", {})
         
-        # Sanitización defensiva de montos numéricos para garantizar compatibilidad total con n8n
+        # Sanitización defensiva de datos extraídos para garantizar compatibilidad total con n8n
         if isinstance(extracted, dict):
             for k in ["monto_total", "monto_subtotal", "monto_impuestos"]:
                 if k in extracted and extracted[k] is not None:
@@ -231,6 +243,26 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                             extracted[k] = float(clean_str)
                         except (ValueError, TypeError):
                             pass
+
+            if "match_score" in extracted and extracted["match_score"] is not None:
+                try:
+                    if isinstance(extracted["match_score"], str):
+                        clean_score = re.sub(r"[^\d.]", "", extracted["match_score"])
+                        extracted["match_score"] = float(clean_score) if clean_score else 80.0
+                    else:
+                        extracted["match_score"] = float(extracted["match_score"])
+                except Exception:
+                    extracted["match_score"] = 80.0
+
+            if "anos_experiencia" in extracted and extracted["anos_experiencia"] is not None:
+                try:
+                    if isinstance(extracted["anos_experiencia"], str):
+                        clean_exp = re.sub(r"[^\d.]", "", extracted["anos_experiencia"])
+                        extracted["anos_experiencia"] = float(clean_exp) if clean_exp else 0.0
+                    else:
+                        extracted["anos_experiencia"] = float(extracted["anos_experiencia"])
+                except Exception:
+                    pass
         doc.extracted_data = extracted
 
         # 3. Vectorización

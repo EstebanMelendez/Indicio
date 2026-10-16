@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 def notify_document_status(document: Document) -> None:
     webhook_url = os.getenv("N8N_WEBHOOK_URL")
     invoice_webhook_url = os.getenv("N8N_INVOICE_WEBHOOK_URL", "http://localhost:5678/webhook/invoice-approval")
+    hr_webhook_url = os.getenv("N8N_HR_WEBHOOK_URL", "http://localhost:5678/webhook/hr-scouting")
 
     payload = {
         "tenant_id": document.tenant_id,
@@ -39,4 +40,15 @@ def notify_document_status(document: Document) -> None:
         except httpx.HTTPError as exc:
             logger.warning(
                 "No se pudo notificar a n8n facturas para el documento %s: %s", document.id, exc
+            )
+
+    # 3. Si es Hoja de Vida / Perfil Laboral, notificar al flujo de Headhunter & Scouting
+    is_hr = document.category and any(k in document.category for k in ["Hoja de Vida", "Perfiles Laborales", "Laboral", "Curriculum", "CV"])
+    if hr_webhook_url and is_hr and document.status == "Procesado":
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.post(hr_webhook_url, json=payload)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "No se pudo notificar a n8n HR scouting para el documento %s: %s", document.id, exc
             )
