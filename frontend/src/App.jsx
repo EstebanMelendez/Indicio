@@ -4,7 +4,8 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import Repository from './components/Repository';
 import Assistant from './components/Assistant';
-import { documentAPI, folderAPI, dashboardAPI } from './services/api';
+import Vacancies from './components/Vacancies';
+import { documentAPI, folderAPI, dashboardAPI, vacancyAPI } from './services/api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -65,6 +66,7 @@ export default function App() {
       <main className="flex-1 p-8 overflow-y-auto">
         {activeTab === 'dashboard' && <Dashboard stats={stats} />}
         {activeTab === 'repository' && <Repository folders={folders} documents={documents} fetchData={fetchData} />}
+        {activeTab === 'vacancies' && <Vacancies documents={documents} fetchData={fetchData} />}
         {activeTab === 'chat' && <Assistant documents={documents} />}
       </main>
     </div>

@@ -1,4 +1,4 @@
-import { PieChart, FileText, MessageSquare, LogOut } from 'lucide-react';
+import { PieChart, FileText, MessageSquare, LogOut, Briefcase } from 'lucide-react';
 import { authAPI } from '../services/api';
 
 export default function Sidebar({ activeTab, setActiveTab, onLogout }) {
@@ -22,6 +22,9 @@ export default function Sidebar({ activeTab, setActiveTab, onLogout }) {
         </button>
         <button onClick={() => setActiveTab('repository')} className={`w-full flex items-center p-3 rounded ${activeTab === 'repository' ? 'bg-blue-600' : 'hover:bg-slate-800'}`}>
           <FileText className="w-5 h-5 mr-3"/> Repositorio
+        </button>
+        <button onClick={() => setActiveTab('vacancies')} className={`w-full flex items-center p-3 rounded ${activeTab === 'vacancies' ? 'bg-blue-600' : 'hover:bg-slate-800'}`}>
+          <Briefcase className="w-5 h-5 mr-3"/> Vacantes / HR
         </button>
         <button onClick={() => setActiveTab('chat')} className={`w-full flex items-center p-3 rounded ${activeTab === 'chat' ? 'bg-blue-600' : 'hover:bg-slate-800'}`}>
           <MessageSquare className="w-5 h-5 mr-3"/> Asistente IA

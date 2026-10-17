@@ -10,13 +10,14 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    > docker-compose up -d
    (Esto levanta la Base de Datos PostgreSQL y el servidor de automatización n8n).
 
-2. CONFIGURACIÓN INICIAL DE USUARIOS (Solo la primera vez)
+2. CONFIGURACIÓN INICIAL DE USUARIOS Y TABLAS (Solo la primera vez o tras actualizaciones)
    ---------------------------------
-   Abre una terminal, entra a la carpeta 'backend', activa el entorno virtual y ejecuta los scripts de creación de usuarios:
+   Abre una terminal, entra a la carpeta 'backend', activa el entorno virtual y ejecuta los scripts:
    > cd backend
    > venv\Scripts\activate
-   > python create_admin.py     (Crea el admin: indicio.admin@gmail.com / admin123)
-   > python create_n8n_user.py  (Crea el usuario para n8n: n8n.service@gmail.com usando la contraseña del .env)
+   > python migration_vacancies.py (Crea la tabla de vacantes y actualiza el esquema RAG de Hojas de Vida)
+   > python create_admin.py        (Crea el admin: indicio.admin@gmail.com / admin123)
+   > python create_n8n_user.py     (Crea el usuario para n8n: n8n.service@gmail.com usando la contraseña del .env)
 
 3. ENCENDER EL BACKEND (FastAPI / IA)
    ---------------------------------

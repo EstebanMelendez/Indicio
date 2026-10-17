@@ -54,4 +54,13 @@ export const ragAPI = {
   query: (queryStr, docIds = []) => api.post('/rag/query', { query: queryStr, document_ids: docIds }),
 };
 
+export const vacancyAPI = {
+  getAll: (params) => api.get('/vacancies', { params }),
+  getById: (id) => api.get(`/vacancies/${id}`),
+  create: (data) => api.post('/vacancies', data),
+  update: (id, data) => api.put(`/vacancies/${id}`, data),
+  delete: (id) => api.delete(`/vacancies/${id}`),
+  matchDocument: (vacancyId, documentId) => api.post(`/vacancies/${vacancyId}/match/${documentId}`),
+};
+
 export default api;

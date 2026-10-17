@@ -3,6 +3,7 @@ import shutil
 import json
 import time
 import re
+import math
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, Query, BackgroundTasks
@@ -13,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db, engine, Base
-from app.models import Document, DocumentChunk, Folder, User, BlacklistedToken
+from app.models import Document, DocumentChunk, Folder, User, BlacklistedToken, Vacancy
 from app.auth import get_current_user, create_access_token, verify_password, oauth2_scheme
 from app.notifications import notify_document_status
 import google.generativeai as genai
@@ -112,6 +113,352 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db), current_user: U
     db.delete(folder)
     db.commit()
     return {"message": "Carpeta eliminada"}
+
+# --- VACANTES Y EMPAREJAMIENTO HÍBRIDO (NIVEL 3) ---
+
+def cosine_similarity(vec1, vec2) -> float:
+    if not vec1 or not vec2:
+        return 0.0
+    v1 = list(vec1)
+    v2 = list(vec2)
+    if len(v1) != len(v2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm1 = math.sqrt(sum(a * a for a in v1))
+    norm2 = math.sqrt(sum(b * b for b in v2))
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
+def compute_vacancy_embedding(title: str, department: str, description: str, requirements: str, required_skills: list) -> list:
+    skills_str = ", ".join(required_skills) if isinstance(required_skills, list) else str(required_skills or "")
+    full_text = f"Vacante: {title}. Departamento: {department}. Descripción del puesto: {description}. Requisitos: {requirements}. Habilidades requeridas: {skills_str}"
+    try:
+        res = genai.embed_content(
+            model=MODEL_EMB,
+            content=full_text[:2000],
+            task_type="retrieval_document",
+            output_dimensionality=768
+        )
+        return res['embedding']
+    except Exception as e:
+        print(f"[WARN] Error generando embedding de vacante: {e}")
+        return None
+
+def calculate_semantic_similarity(vacancy_emb, doc_chunks: list) -> float:
+    if not vacancy_emb or not doc_chunks:
+        return 70.0
+    similarities = []
+    for chunk in doc_chunks:
+        if chunk.embedding is not None:
+            sim = cosine_similarity(vacancy_emb, chunk.embedding)
+            similarities.append(sim)
+    if not similarities:
+        return 70.0
+    similarities.sort(reverse=True)
+    top_sim = similarities[:3]
+    avg_sim = sum(top_sim) / len(top_sim)
+    score = max(0.0, min(100.0, ((avg_sim + 1.0) / 2.0) * 100.0))
+    return round(score, 1)
+
+def evaluate_cv_against_vacancy(cv_text: str, vacancy: Vacancy, candidate_models: list) -> dict:
+    skills_str = ", ".join(vacancy.required_skills) if isinstance(vacancy.required_skills, list) else str(vacancy.required_skills or "")
+    prompt = f"""Eres un Headhunter Senior y evaluador técnico de talento humano.
+Evalúa ESTRICTAMENTE este currículum contra la VACANTE OBJETIVO indicada.
+Tu análisis debe ser objetivo, técnico y cuantitativo.
+Responde ÚNICAMENTE un objeto JSON válido, sin delimitadores markdown.
+
+VACANTE OBJETIVO:
+- Título del Puesto: {vacancy.title}
+- Departamento: {vacancy.department}
+- Descripción: {vacancy.description}
+- Requisitos: {vacancy.requirements}
+- Años mínimos de experiencia requeridos: {vacancy.min_years_experience}
+- Habilidades / Tecnologías clave requeridas: {skills_str}
+
+CURRÍCULUM DEL POSTULANTE:
+{cv_text[:7000]}
+
+ESQUEMA JSON REQUERIDO:
+{{
+    "postulante": "Nombre completo detectado",
+    "rol": "Cargo o perfil profesional principal",
+    "anos_experiencia": 0.0,
+    "competencias": ["habilidad1", "habilidad2"],
+    "matched_skills": ["habilidad requerida por la vacante que el candidato SÍ posee"],
+    "missing_skills": ["habilidad requerida por la vacante que el candidato NO menciona o carece"],
+    "experience_gap": "Resumen del cumplimiento de experiencia (ej: 'Cumple: 4 años vs 3 mínimos')",
+    "green_flags": ["Fortaleza 1 frente a la vacante", "Fortaleza 2"],
+    "red_flags": ["Brecha o riesgo frente a la vacante"],
+    "gemini_score": 85.0,
+    "resumen_scouting": "Síntesis ejecutiva de 2 a 3 líneas sobre el ajuste del candidato a esta vacante"
+}}"""
+
+    for model_name in candidate_models:
+        try:
+            curr_model = genai.GenerativeModel(model_name)
+            res = curr_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+            raw = res.text.strip()
+            if raw.startswith("```json"):
+                raw = raw[7:-3].strip()
+            elif raw.startswith("```"):
+                raw = raw[3:-3].strip()
+            return json.loads(raw)
+        except Exception as e:
+            print(f"[WARN] Error en evaluate_cv_against_vacancy con {model_name}: {e}")
+            continue
+    return None
+
+class VacancyCreate(BaseModel):
+    title: str
+    department: Optional[str] = "Tecnología"
+    description: str
+    requirements: str
+    min_years_experience: Optional[int] = 0
+    required_skills: Optional[list[str]] = []
+    status: Optional[str] = "Abierta"
+
+class VacancyUpdate(BaseModel):
+    title: Optional[str] = None
+    department: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    min_years_experience: Optional[int] = None
+    required_skills: Optional[list[str]] = None
+    status: Optional[str] = None
+
+@app.post("/api/vacancies")
+def create_vacancy(
+    data: VacancyCreate, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    emb = compute_vacancy_embedding(data.title, data.department, data.description, data.requirements, data.required_skills)
+    new_vac = Vacancy(
+        tenant_id=current_user.tenant_id,
+        title=data.title,
+        department=data.department or "Tecnología",
+        description=data.description,
+        requirements=data.requirements,
+        min_years_experience=data.min_years_experience or 0,
+        required_skills=data.required_skills or [],
+        status=data.status or "Abierta",
+        embedding=emb
+    )
+    db.add(new_vac)
+    db.commit()
+    db.refresh(new_vac)
+    return new_vac
+
+@app.get("/api/vacancies")
+def list_vacancies(
+    status: Optional[str] = Query(None),
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    q = db.query(Vacancy).filter(Vacancy.tenant_id == current_user.tenant_id)
+    if status:
+        q = q.filter(Vacancy.status == status)
+    vacancies = q.order_by(Vacancy.created_at.desc()).all()
+    
+    result = []
+    for vac in vacancies:
+        candidates = db.query(Document).filter(Document.vacancy_id == vac.id, Document.tenant_id == current_user.tenant_id).all()
+        scores = []
+        for c in candidates:
+            if c.extracted_data and isinstance(c.extracted_data, dict):
+                score = c.extracted_data.get("match_score")
+                if score is not None:
+                    try:
+                        scores.append(float(score))
+                    except Exception:
+                        pass
+        top_score = max(scores) if scores else 0.0
+        avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+        
+        result.append({
+            "id": vac.id,
+            "title": vac.title,
+            "department": vac.department,
+            "description": vac.description,
+            "requirements": vac.requirements,
+            "min_years_experience": vac.min_years_experience,
+            "required_skills": vac.required_skills or [],
+            "status": vac.status,
+            "created_at": vac.created_at,
+            "candidates_count": len(candidates),
+            "top_score": top_score,
+            "avg_score": avg_score
+        })
+    return result
+
+@app.get("/api/vacancies/{vacancy_id}")
+def get_vacancy_detail(
+    vacancy_id: int, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
+    if not vac:
+        raise HTTPException(status_code=404, detail="Vacante no encontrada")
+        
+    candidates = db.query(Document).filter(Document.vacancy_id == vac.id, Document.tenant_id == current_user.tenant_id).all()
+    
+    def get_score(doc):
+        if doc.extracted_data and isinstance(doc.extracted_data, dict):
+            s = doc.extracted_data.get("match_score")
+            if s is not None:
+                try:
+                    return float(s)
+                except Exception:
+                    pass
+        return 0.0
+        
+    sorted_candidates = sorted(candidates, key=get_score, reverse=True)
+    
+    return {
+        "id": vac.id,
+        "title": vac.title,
+        "department": vac.department,
+        "description": vac.description,
+        "requirements": vac.requirements,
+        "min_years_experience": vac.min_years_experience,
+        "required_skills": vac.required_skills or [],
+        "status": vac.status,
+        "created_at": vac.created_at,
+        "candidates": sorted_candidates
+    }
+
+@app.put("/api/vacancies/{vacancy_id}")
+def update_vacancy(
+    vacancy_id: int,
+    data: VacancyUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
+    if not vac:
+        raise HTTPException(status_code=404, detail="Vacante no encontrada")
+        
+    need_emb = False
+    if data.title is not None:
+        vac.title = data.title
+        need_emb = True
+    if data.department is not None:
+        vac.department = data.department
+    if data.description is not None:
+        vac.description = data.description
+        need_emb = True
+    if data.requirements is not None:
+        vac.requirements = data.requirements
+        need_emb = True
+    if data.min_years_experience is not None:
+        vac.min_years_experience = data.min_years_experience
+    if data.required_skills is not None:
+        vac.required_skills = data.required_skills
+        need_emb = True
+    if data.status is not None:
+        vac.status = data.status
+        
+    if need_emb:
+        vac.embedding = compute_vacancy_embedding(vac.title, vac.department, vac.description, vac.requirements, vac.required_skills)
+        
+    db.commit()
+    db.refresh(vac)
+    return vac
+
+@app.delete("/api/vacancies/{vacancy_id}")
+def delete_vacancy(
+    vacancy_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
+    if not vac:
+        raise HTTPException(status_code=404, detail="Vacante no encontrada")
+    db.delete(vac)
+    db.commit()
+    return {"message": "Vacante eliminada"}
+
+@app.post("/api/vacancies/{vacancy_id}/match/{document_id}")
+def match_document_to_vacancy(
+    vacancy_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from sqlalchemy.orm.attributes import flag_modified
+    vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
+    if not vac:
+        raise HTTPException(status_code=404, detail="Vacante no encontrada")
+    
+    doc = db.query(Document).filter(Document.id == document_id, Document.tenant_id == current_user.tenant_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        
+    raw_text = extract_text(doc.file_path, doc.filename)
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="No se pudo extraer texto del documento")
+        
+    chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).all()
+    semantic_score = calculate_semantic_similarity(vac.embedding, chunks)
+    
+    candidate_models = list(dict.fromkeys([
+        os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash"),
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite"
+    ]))
+    vac_eval = evaluate_cv_against_vacancy(raw_text, vac, candidate_models)
+    
+    extracted = dict(doc.extracted_data or {})
+    if vac_eval:
+        gemini_score = float(vac_eval.get("gemini_score", 75.0))
+        final_match_score = round(0.65 * gemini_score + 0.35 * semantic_score, 1)
+        extracted["match_score"] = final_match_score
+        extracted["gemini_score"] = gemini_score
+        extracted["semantic_score"] = semantic_score
+        extracted["vacancy_id"] = vac.id
+        extracted["vacancy_title"] = vac.title
+        extracted["matched_skills"] = vac_eval.get("matched_skills", [])
+        extracted["missing_skills"] = vac_eval.get("missing_skills", [])
+        extracted["experience_gap"] = vac_eval.get("experience_gap", "")
+        extracted["green_flags"] = vac_eval.get("green_flags", extracted.get("green_flags", []))
+        extracted["red_flags"] = vac_eval.get("red_flags", [])
+        extracted["resumen_scouting"] = vac_eval.get("resumen_scouting", extracted.get("resumen_scouting", ""))
+        if vac_eval.get("postulante"):
+            extracted["postulante"] = vac_eval["postulante"]
+        if vac_eval.get("rol"):
+            extracted["rol"] = vac_eval["rol"]
+        if vac_eval.get("anos_experiencia") is not None:
+            try:
+                extracted["anos_experiencia"] = float(vac_eval["anos_experiencia"])
+            except Exception:
+                pass
+    else:
+        extracted["match_score"] = semantic_score
+        extracted["semantic_score"] = semantic_score
+        extracted["vacancy_id"] = vac.id
+        extracted["vacancy_title"] = vac.title
+
+    doc.vacancy_id = vac.id
+    doc.extracted_data = extracted
+    flag_modified(doc, "extracted_data")
+    db.commit()
+    db.refresh(doc)
+    
+    return {
+        "message": "Evaluación contra vacante completada",
+        "document_id": doc.id,
+        "vacancy_id": vac.id,
+        "match_score": extracted.get("match_score"),
+        "gemini_score": extracted.get("gemini_score"),
+        "semantic_score": extracted.get("semantic_score"),
+        "matched_skills": extracted.get("matched_skills"),
+        "missing_skills": extracted.get("missing_skills"),
+        "resumen_scouting": extracted.get("resumen_scouting")
+    }
 
 def process_document_background(doc_id: int, file_path: str, filename: str):
     # This must create its own DB session since it runs in the background
@@ -265,8 +612,9 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                     pass
         doc.extracted_data = extracted
 
-        # 3. Vectorización
+        # 3. Vectorización de Chunks
         chunks = [raw_text[i:i+700] for i in range(0, len(raw_text), 700)]
+        created_chunks = []
         for i, chunk in enumerate(chunks):
             emb = None
             for attempt in range(3):
@@ -282,7 +630,57 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                     raise e
             
             if emb:
-                db.add(DocumentChunk(document_id=doc.id, chunk_index=i, chunk_text=chunk, embedding=emb))
+                chunk_obj = DocumentChunk(document_id=doc.id, chunk_index=i, chunk_text=chunk, embedding=emb)
+                db.add(chunk_obj)
+                created_chunks.append(chunk_obj)
+
+        # 4. Emparejamiento Híbrido Multivacante (Nivel 3) si es Hoja de Vida
+        is_cv = doc.category and any(k in doc.category for k in ["Vida", "Curriculum", "CV", "Laboral"])
+        target_vacancy = None
+        if doc.vacancy_id:
+            target_vacancy = db.query(Vacancy).filter(Vacancy.id == doc.vacancy_id).first()
+        elif is_cv:
+            open_vacancies = db.query(Vacancy).filter(Vacancy.tenant_id == doc.tenant_id, Vacancy.status == "Abierta").all()
+            if open_vacancies:
+                target_vacancy = open_vacancies[0]
+                doc.vacancy_id = target_vacancy.id
+
+        if is_cv and target_vacancy:
+            print(f"[INFO] Evaluando emparejamiento híbrido con vacante: {target_vacancy.title}")
+            semantic_score = calculate_semantic_similarity(target_vacancy.embedding, created_chunks)
+            vac_eval = evaluate_cv_against_vacancy(raw_text, target_vacancy, candidate_models)
+            
+            if vac_eval:
+                gemini_score = float(vac_eval.get("gemini_score", 75.0))
+                final_match_score = round(0.65 * gemini_score + 0.35 * semantic_score, 1)
+                
+                extracted["match_score"] = final_match_score
+                extracted["gemini_score"] = gemini_score
+                extracted["semantic_score"] = semantic_score
+                extracted["vacancy_id"] = target_vacancy.id
+                extracted["vacancy_title"] = target_vacancy.title
+                extracted["matched_skills"] = vac_eval.get("matched_skills", [])
+                extracted["missing_skills"] = vac_eval.get("missing_skills", [])
+                extracted["experience_gap"] = vac_eval.get("experience_gap", "")
+                extracted["green_flags"] = vac_eval.get("green_flags", extracted.get("green_flags", []))
+                extracted["red_flags"] = vac_eval.get("red_flags", [])
+                extracted["resumen_scouting"] = vac_eval.get("resumen_scouting", extracted.get("resumen_scouting", ""))
+                if vac_eval.get("postulante"):
+                    extracted["postulante"] = vac_eval["postulante"]
+                if vac_eval.get("rol"):
+                    extracted["rol"] = vac_eval["rol"]
+                if vac_eval.get("anos_experiencia") is not None:
+                    try:
+                        extracted["anos_experiencia"] = float(vac_eval["anos_experiencia"])
+                    except Exception:
+                        pass
+            else:
+                extracted["match_score"] = semantic_score
+                extracted["semantic_score"] = semantic_score
+                extracted["vacancy_id"] = target_vacancy.id
+                extracted["vacancy_title"] = target_vacancy.title
+            
+            doc.extracted_data = extracted
 
         doc.status = "Procesado"
         print(f"[OK] Exito procesando: {filename}")
@@ -304,6 +702,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
     folder_id: Optional[int] = Form(None),
+    vacancy_id: Optional[int] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -346,7 +745,8 @@ async def upload_document(
         mime_type=file.content_type, 
         file_size_bytes=os.path.getsize(file_path), 
         status="Pendiente",
-        folder_id=folder_id
+        folder_id=folder_id,
+        vacancy_id=vacancy_id
     )
     db.add(doc)
     db.commit()

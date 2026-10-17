@@ -15,6 +15,7 @@ class Tenant(Base):
     users = relationship("User", back_populates="tenant")
     folders = relationship("Folder", back_populates="tenant")
     documents = relationship("Document", back_populates="tenant")
+    vacancies = relationship("Vacancy", back_populates="tenant")
 
 class User(Base):
     __tablename__ = "users"
@@ -44,12 +45,31 @@ class Folder(Base):
     tenant = relationship("Tenant", back_populates="folders")
     documents = relationship("Document", back_populates="folder")
 
+class Vacancy(Base):
+    __tablename__ = "vacancies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    title = Column(String(255), nullable=False)
+    department = Column(String(100), default="Tecnología")
+    description = Column(Text, nullable=False)
+    requirements = Column(Text, nullable=False)
+    min_years_experience = Column(Integer, default=0)
+    required_skills = Column(JSONB, default=list) # e.g. ["Python", "React", "Docker"]
+    status = Column(String(50), default="Abierta") # "Abierta", "Cerrada", "Pausada"
+    embedding = Column(Vector(768), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="vacancies")
+    documents = relationship("Document", back_populates="vacancy")
+
 class Document(Base):
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
     folder_id = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
+    vacancy_id = Column(Integer, ForeignKey("vacancies.id", ondelete="SET NULL"), nullable=True)
     filename = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=False)
     mime_type = Column(String(100), nullable=False)
@@ -64,6 +84,7 @@ class Document(Base):
     tenant = relationship("Tenant", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
     folder = relationship("Folder", back_populates="documents")
+    vacancy = relationship("Vacancy", back_populates="documents")
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
@@ -78,6 +99,11 @@ class DocumentChunk(Base):
 
 from sqlalchemy import Index
 Index('ix_document_chunks_embedding', DocumentChunk.embedding, 
+      postgresql_using='hnsw', 
+      postgresql_with={'m': 16, 'ef_construction': 64}, 
+      postgresql_ops={'embedding': 'vector_cosine_ops'})
+
+Index('ix_vacancies_embedding', Vacancy.embedding, 
       postgresql_using='hnsw', 
       postgresql_with={'m': 16, 'ef_construction': 64}, 
       postgresql_ops={'embedding': 'vector_cosine_ops'})
