@@ -642,7 +642,19 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         elif is_cv:
             open_vacancies = db.query(Vacancy).filter(Vacancy.tenant_id == doc.tenant_id, Vacancy.status == "Abierta").all()
             if open_vacancies:
-                target_vacancy = open_vacancies[0]
+                if len(open_vacancies) == 1:
+                    target_vacancy = open_vacancies[0]
+                else:
+                    # Enrutamiento inteligente multivacante por afinidad semántica vectorial
+                    best_vac = open_vacancies[0]
+                    best_sim = -1.0
+                    for vac in open_vacancies:
+                        sim = calculate_semantic_similarity(vac.embedding, created_chunks)
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_vac = vac
+                    target_vacancy = best_vac
+                    print(f"[INFO] CV enrutado automáticamente a la vacante más afín: '{target_vacancy.title}' (Afinidad semántica: {best_sim}%)")
                 doc.vacancy_id = target_vacancy.id
 
         if is_cv and target_vacancy:

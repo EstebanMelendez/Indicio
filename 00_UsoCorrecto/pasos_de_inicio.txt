@@ -45,4 +45,12 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    Pass:  admin123
    (Aquí podrás ver todos los documentos procesados por la IA).
 
+7. ASISTENTE RAG POR TELEGRAM (@Indicion8n_bot)
+   ---------------------------------
+   Para consultar tus documentos desde Telegram desde cualquier celular:
+   > cd backend
+   > venv\Scripts\activate
+   > python telegram_bot_service.py
+   (El bot responderá a tus preguntas en tiempo real citando las fuentes).
+
 ===================================================

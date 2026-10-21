@@ -1,0 +1,145 @@
+{
+  "id": "TelegramRAG001",
+  "name": "Indicio - Telegram RAG Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram-rag",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "tg-wh-1",
+      "name": "Webhook Telegram",
+      "webhookId": "telegram-rag-webhook-001"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/auth/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"email\": \"n8n.service@gmail.com\",\n  \"password\": \"n8n_secure_pwd_2026_xyz\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        0
+      ],
+      "id": "tg-login",
+      "name": "Login Backend"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/rag/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": {{ JSON.stringify($('Webhook Telegram').first().json.body.query) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        520,
+        0
+      ],
+      "id": "tg-rag",
+      "name": "Consultar RAG"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rag = $input.first().json;\nconst userName = $('Webhook Telegram').first().json.body.user_name || 'Colega';\nlet sourcesText = '';\nif (rag.sources && rag.sources.length > 0) {\n  sourcesText = '\\n\\n📚 *Fuentes consultadas:*\\n' + rag.sources.map(s => `• 📄 \\`${s}\\``).join('\\n');\n}\nconst text = `🧠 *DocuMind RAG Assistant*\\n\\n${rag.answer}${sourcesText}`;\nreturn { json: { success: true, text: text, sources: rag.sources, raw_answer: rag.answer } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "id": "tg-format",
+      "name": "Formatear Respuesta"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "tg-respond",
+      "name": "Responder Webhook"
+    }
+  ],
+  "connections": {
+    "Webhook Telegram": {
+      "main": [
+        [
+          {
+            "node": "Login Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login Backend": {
+      "main": [
+        [
+          {
+            "node": "Consultar RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar RAG": {
+      "main": [
+        [
+          {
+            "node": "Formatear Respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatear Respuesta": {
+      "main": [
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
