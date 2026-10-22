@@ -1,0 +1,9 @@
+# https://www.robotstxt.org/robotstxt.html
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /storage/
+Disallow: /admin/
+Disallow: /private/
+
+Sitemap: https://indicio.enterprise/sitemap.xml

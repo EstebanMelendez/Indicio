@@ -24,6 +24,7 @@ class User(Base):
     tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
+    role = Column(String(50), default="admin", nullable=False) # "admin", "auditor", "service", "user"
 
     tenant = relationship("Tenant", back_populates="users")
 

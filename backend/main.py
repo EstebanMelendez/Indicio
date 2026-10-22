@@ -4,6 +4,7 @@ import json
 import time
 import re
 import math
+import logging
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, Query, BackgroundTasks
@@ -15,7 +16,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db, engine, Base
 from app.models import Document, DocumentChunk, Folder, User, BlacklistedToken, Vacancy
-from app.auth import get_current_user, create_access_token, verify_password, oauth2_scheme
+from app.auth import get_current_user, create_access_token, verify_password, oauth2_scheme, require_role
+from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log
 from app.notifications import notify_document_status
 import google.generativeai as genai
 import pdfplumber
@@ -23,13 +25,20 @@ import docx
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger("IndicioBackend")
 
-# Configuración IA
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Configuración y enmascaramiento seguro de IA
+gemini_key = os.getenv("GEMINI_API_KEY")
+if gemini_key:
+    logger.info("API Key de Gemini configurada de forma segura: %s", mask_secret(gemini_key))
+    genai.configure(api_key=gemini_key)
+else:
+    logger.warning("[SEGURIDAD CRÍTICA] GEMINI_API_KEY no encontrada en las variables de entorno.")
+
 MODEL_TEXT = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
 MODEL_EMB = os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-005")
 
-app = FastAPI(title="Indicio Enterprise")
+app = FastAPI(title="Indicio Enterprise", description="Plataforma Segura de Gestión Documental Inteligente y RAG")
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +47,57 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from sqlalchemy import text
+
+@app.on_event("startup")
+def startup_db_check():
+    """Garantiza la consistencia automática del esquema de la base de datos al encender el backend"""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user';"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;"))
+            conn.commit()
+        logger.info("[SEGURIDAD] Verificación y migración de esquema completada exitosamente.")
+    except Exception as e:
+        logger.warning("[SEGURIDAD] No se pudo verificar el esquema en startup: %s", e)
+
+def serialize_document(doc: Document, user_role: str) -> dict:
+    """
+    Serializa un documento aplicando:
+    1. Descifrado seguro de datos sensibles en reposo (_encrypted_data).
+    2. Restricción de acceso a registros técnicos / error_log según el rol del usuario.
+    3. Sanitización de trazas para garantizar que ninguna API key o token sea devuelto.
+    """
+    data = doc.extracted_data
+    if isinstance(data, dict) and "_encrypted_data" in data:
+        decrypted = decrypt_sensitive_data(data["_encrypted_data"])
+        if isinstance(decrypted, dict):
+            data = decrypted
+
+    # Restricción de registros: Solo administradores y auditores tienen acceso al detalle técnico
+    error_log = None
+    if user_role in ["admin", "auditor"]:
+        error_log = sanitize_error_log(doc.error_log)
+    elif doc.status == "Error":
+        error_log = "Error en el procesamiento del archivo. Contacte al administrador del sistema."
+
+    return {
+        "id": doc.id,
+        "filename": doc.filename,
+        "category": doc.category,
+        "status": doc.status,
+        "folder_id": doc.folder_id,
+        "vacancy_id": doc.vacancy_id,
+        "mime_type": doc.mime_type,
+        "file_size_bytes": doc.file_size_bytes,
+        "summary": doc.summary,
+        "extracted_data": data,
+        "error_log": error_log,
+        "created_at": doc.created_at,
+        "tenant_id": doc.tenant_id
+    }
 
 # --- SERVICIOS ---
 def extract_text(file_path: str, filename: str) -> str:
@@ -64,8 +124,16 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == login_data.email).first()
     if not user or not verify_password(login_data.password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
-    access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    
+    user_role = getattr(user, "role", "user") or "user"
+    tenant_id = user.tenant_id if user.tenant_id is not None else 1
+    access_token = create_access_token(data={"sub": user.email, "role": user_role, "tenant_id": tenant_id})
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "role": user_role,
+        "tenant_id": tenant_id
+    }
 
 @app.post("/api/auth/logout")
 def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -94,7 +162,7 @@ class FolderCreate(BaseModel):
     name: str
 
 @app.post("/api/folders")
-def create_folder(folder: FolderCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_folder(folder: FolderCreate, db: Session = Depends(get_db), current_user: User = Depends(require_role(["admin"]))):
     new_folder = Folder(name=folder.name, tenant_id=current_user.tenant_id)
     db.add(new_folder)
     db.commit()
@@ -106,10 +174,10 @@ def list_folders(db: Session = Depends(get_db), current_user: User = Depends(get
     return db.query(Folder).filter(Folder.tenant_id == current_user.tenant_id).order_by(Folder.created_at.desc()).all()
 
 @app.delete("/api/folders/{folder_id}")
-def delete_folder(folder_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_folder(folder_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_role(["admin"]))):
     folder = db.query(Folder).filter(Folder.id == folder_id, Folder.tenant_id == current_user.tenant_id).first()
     if not folder:
-        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada o no pertenece a su organización")
     db.delete(folder)
     db.commit()
     return {"message": "Carpeta eliminada"}
@@ -231,7 +299,7 @@ class VacancyUpdate(BaseModel):
 def create_vacancy(
     data: VacancyCreate, 
     db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin"]))
 ):
     emb = compute_vacancy_embedding(data.title, data.department, data.description, data.requirements, data.required_skills)
     new_vac = Vacancy(
@@ -334,7 +402,7 @@ def update_vacancy(
     vacancy_id: int,
     data: VacancyUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin"]))
 ):
     vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
     if not vac:
@@ -371,7 +439,7 @@ def update_vacancy(
 def delete_vacancy(
     vacancy_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin"]))
 ):
     vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
     if not vac:
@@ -385,7 +453,7 @@ def match_document_to_vacancy(
     vacancy_id: int,
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin"]))
 ):
     from sqlalchemy.orm.attributes import flag_modified
     vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
@@ -692,15 +760,24 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 extracted["vacancy_id"] = target_vacancy.id
                 extracted["vacancy_title"] = target_vacancy.title
             
-            doc.extracted_data = extracted
+        # Cifrado de datos sensibles en PostgreSQL (Cifrado en reposo)
+        doc.extracted_data = {
+            "_encrypted_data": encrypt_sensitive_data(extracted),
+            "match_score": extracted.get("match_score") if isinstance(extracted, dict) else None,
+            "postulante": extracted.get("postulante") if isinstance(extracted, dict) else None,
+            "rol": extracted.get("rol") if isinstance(extracted, dict) else None,
+            "anos_experiencia": extracted.get("anos_experiencia") if isinstance(extracted, dict) else None,
+            "total": extracted.get("total") if isinstance(extracted, dict) else None,
+            "proveedor": extracted.get("proveedor") if isinstance(extracted, dict) else None
+        }
 
         doc.status = "Procesado"
         print(f"[OK] Exito procesando: {filename}")
 
     except Exception as e:
         doc.status = "Error"
-        doc.error_log = str(e)
-        print(f"[ERROR] Error en {filename}: {str(e)}") 
+        doc.error_log = sanitize_error_log(str(e))
+        print(f"[ERROR] Error en {filename}: {doc.error_log}") 
     
     finally:
         db.commit()
@@ -716,7 +793,7 @@ async def upload_document(
     folder_id: Optional[int] = Form(None),
     vacancy_id: Optional[int] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin", "user", "service"]))
 ):
     ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
     MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB
@@ -731,15 +808,27 @@ async def upload_document(
     if size > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="El archivo supera el límite de 10 MB")
 
-    os.makedirs(f"storage/tenant_{current_user.tenant_id}", exist_ok=True)
-    file_path = f"storage/tenant_{current_user.tenant_id}/{file.filename}"
+    # Sanitización de nombre de archivo para prevenir Path Traversal
+    raw_basename = os.path.basename(file.filename)
+    safe_filename = re.sub(r'[^a-zA-Z0-9_\-\. ]', '_', raw_basename).strip()
+    if not safe_filename or safe_filename.startswith("."):
+        safe_filename = f"doc_{int(time.time())}{ext}"
+
+    # Aislamiento de almacenamiento físico particionado por inquilino
+    tenant_storage = f"storage/tenant_{current_user.tenant_id}"
+    os.makedirs(tenant_storage, exist_ok=True)
+    file_path = f"{tenant_storage}/{safe_filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    if not folder_id:
-        # Solo los documentos recibidos por el bot de n8n van a "Bandeja n8n"
+    # Validación estricta multi-tenant de carpeta y vacante
+    if folder_id:
+        folder_check = db.query(Folder).filter(Folder.id == folder_id, Folder.tenant_id == current_user.tenant_id).first()
+        if not folder_check:
+            raise HTTPException(status_code=400, detail="La carpeta seleccionada no pertenece a tu organización")
+    else:
+        # Documentos recibidos por el bot de n8n van a "Bandeja n8n"
         if current_user.email == "n8n.service@gmail.com":
-            from app.models import Folder
             folder = db.query(Folder).filter(Folder.name == "Bandeja n8n", Folder.tenant_id == current_user.tenant_id).first()
             if not folder:
                 folder = Folder(name="Bandeja n8n", tenant_id=current_user.tenant_id)
@@ -749,10 +838,15 @@ async def upload_document(
             folder_id = folder.id
         else:
             folder_id = None
+
+    if vacancy_id:
+        vac_check = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
+        if not vac_check:
+            raise HTTPException(status_code=400, detail="La vacante seleccionada no pertenece a tu organización")
         
     doc = Document(
         tenant_id=current_user.tenant_id,
-        filename=file.filename, 
+        filename=safe_filename, 
         file_path=file_path, 
         mime_type=file.content_type, 
         file_size_bytes=os.path.getsize(file_path), 
@@ -764,7 +858,7 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    background_tasks.add_task(process_document_background, doc.id, file_path, file.filename)
+    background_tasks.add_task(process_document_background, doc.id, file_path, safe_filename)
     
     return {"message": "Documento subido. El procesamiento ha iniciado en segundo plano.", "id": doc.id, "status": doc.status}
 
@@ -794,23 +888,27 @@ def list_documents(
             raise HTTPException(status_code=400, detail="Formato de start_date inválido. Use YYYY-MM-DD")
     if end_date:
         try:
-            # We add 1 day to end_date to include the whole day (up to 23:59:59)
             from datetime import timedelta
             end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
             query = query.filter(Document.created_at < end)
         except ValueError:
             raise HTTPException(status_code=400, detail="Formato de end_date inválido. Use YYYY-MM-DD")
             
-    return query.order_by(Document.id.desc()).all()
+    docs = query.order_by(Document.id.desc()).all()
+    user_role = getattr(current_user, "role", "user") or "user"
+    return [serialize_document(d, user_role) for d in docs]
 
 @app.delete("/api/documents/{doc_id}")
-def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_role(["admin"]))):
     doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
     
     if os.path.exists(doc.file_path):
-        os.remove(doc.file_path)
+        try:
+            os.remove(doc.file_path)
+        except Exception:
+            pass
         
     db.delete(doc)
     db.commit()
@@ -820,8 +918,9 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: Us
 def get_document_details(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
-    return doc
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
+    user_role = getattr(current_user, "role", "user") or "user"
+    return serialize_document(doc, user_role)
 
 class DocumentUpdate(BaseModel):
     folder_id: Optional[int] = None
@@ -834,11 +933,11 @@ def update_document(
     doc_id: int, 
     update_data: DocumentUpdate, 
     db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin", "service"]))
 ):
     doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
     
     if update_data.folder_name:
         folder = db.query(Folder).filter(Folder.name == update_data.folder_name, Folder.tenant_id == current_user.tenant_id).first()
@@ -849,12 +948,23 @@ def update_document(
             db.refresh(folder)
         doc.folder_id = folder.id
     elif update_data.folder_id is not None:
+        folder_check = db.query(Folder).filter(Folder.id == update_data.folder_id, Folder.tenant_id == current_user.tenant_id).first()
+        if not folder_check:
+            raise HTTPException(status_code=400, detail="La carpeta seleccionada no pertenece a tu organización")
         doc.folder_id = update_data.folder_id
         
     if update_data.status is not None:
         doc.status = update_data.status
     if update_data.extracted_data is not None:
-        doc.extracted_data = update_data.extracted_data
+        # Cifrar antes de guardar
+        doc.extracted_data = {
+            "_encrypted_data": encrypt_sensitive_data(update_data.extracted_data),
+            "match_score": update_data.extracted_data.get("match_score"),
+            "postulante": update_data.extracted_data.get("postulante"),
+            "rol": update_data.extracted_data.get("rol"),
+            "total": update_data.extracted_data.get("total"),
+            "proveedor": update_data.extracted_data.get("proveedor")
+        }
         
     db.commit()
     db.refresh(doc)
@@ -862,7 +972,7 @@ def update_document(
 
 class WorkflowUpdateSchema(BaseModel):
     target_folder_name: str
-    payment_status: str  # Ej: "APROBADA", "RECHAZADA", "DUPLICADA", "PENDIENTE_APROBACION"
+    payment_status: str
     notes: Optional[str] = None
 
 @app.patch("/api/documents/{document_id}/workflow-update")
@@ -870,7 +980,7 @@ def update_document_from_n8n(
     document_id: int,
     payload: WorkflowUpdateSchema,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role(["admin", "service"]))
 ):
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -879,9 +989,8 @@ def update_document_from_n8n(
         Document.tenant_id == current_user.tenant_id
     ).first()
     if not doc:
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
 
-    # 1. Buscar o crear la carpeta destino automáticamente para ese tenant
     folder = db.query(Folder).filter(
         Folder.name == payload.target_folder_name,
         Folder.tenant_id == current_user.tenant_id
@@ -893,15 +1002,25 @@ def update_document_from_n8n(
         db.commit()
         db.refresh(folder)
 
-    # 2. Mover documento de carpeta
     doc.folder_id = folder.id
 
-    # 3. Guardar trazabilidad contable dentro de extracted_data
-    updated_data = dict(doc.extracted_data or {})
+    raw_extracted = doc.extracted_data or {}
+    if isinstance(raw_extracted, dict) and "_encrypted_data" in raw_extracted:
+        raw_extracted = decrypt_sensitive_data(raw_extracted["_encrypted_data"])
+    updated_data = dict(raw_extracted or {})
     updated_data["estado_contable"] = payload.payment_status
     if payload.notes:
         updated_data["notas_auditoria"] = payload.notes
-    doc.extracted_data = updated_data
+        
+    doc.extracted_data = {
+        "_encrypted_data": encrypt_sensitive_data(updated_data),
+        "match_score": updated_data.get("match_score"),
+        "postulante": updated_data.get("postulante"),
+        "rol": updated_data.get("rol"),
+        "total": updated_data.get("total"),
+        "proveedor": updated_data.get("proveedor"),
+        "estado_contable": payload.payment_status
+    }
     flag_modified(doc, "extracted_data")
 
     db.commit()
@@ -916,8 +1035,14 @@ def update_document_from_n8n(
 def download_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doc = db.query(Document).filter(Document.id == doc_id, Document.tenant_id == current_user.tenant_id).first()
     if not doc:
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
     
+    # Prevención estricta de Path Traversal
+    real_path = os.path.abspath(doc.file_path)
+    base_storage = os.path.abspath("storage")
+    if not real_path.startswith(base_storage):
+        raise HTTPException(status_code=403, detail="Acceso denegado: ruta de archivo no permitida")
+
     if not os.path.exists(doc.file_path):
         raise HTTPException(status_code=404, detail="Archivo no encontrado en el servidor")
         
@@ -933,21 +1058,31 @@ def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_u
     q_emb = genai.embed_content(model=MODEL_EMB, content=query, task_type="retrieval_query", output_dimensionality=768)['embedding']
     
     dist_expr = DocumentChunk.embedding.cosine_distance(q_emb)
-    # Threshold de distancia opcional para evitar ruido: dist_expr < 0.3
     
+    # Aislamiento multi-tenant estricto: solo chunks de documentos de este tenant
     base_query = db.query(DocumentChunk.chunk_text, Document.filename, dist_expr.label("dist")) \
-                .join(Document).filter(Document.tenant_id == current_user.tenant_id, dist_expr < 0.4)
+                .join(Document, DocumentChunk.document_id == Document.id) \
+                .filter(Document.tenant_id == current_user.tenant_id, dist_expr < 0.4)
                 
     if payload.document_ids:
-        base_query = base_query.filter(Document.id.in_(payload.document_ids))
+        # Validar que los document_ids pertenezcan exclusivamente a este tenant
+        valid_ids = [r[0] for r in db.query(Document.id).filter(
+            Document.id.in_(payload.document_ids), 
+            Document.tenant_id == current_user.tenant_id
+        ).all()]
+        if valid_ids:
+            base_query = base_query.filter(Document.id.in_(valid_ids))
+        else:
+            return {"answer": "Los documentos seleccionados no pertenecen a tu organización.", "sources": []}
         
-    results = base_query.order_by(dist_expr).limit(3).all()
+    results = base_query.order_by(dist_expr).limit(4).all()
                 
     if not results:
-        return {"answer": "No encontré información relevante en los documentos para responder a tu pregunta.", "sources": []}
+        return {"answer": "No encontré información relevante en los documentos de tu organización para responder a tu pregunta.", "sources": []}
         
     context = "\n".join([f"Archivo {r[1]}: {r[0]}" for r in results])
     
     model = genai.GenerativeModel(MODEL_TEXT)
-    prompt = f"Responde la pregunta basándote SOLO en este contexto. Cita los archivos. Contexto:\n{context}\nPregunta: {query}"
+    prompt = f"Responde la pregunta basándote SOLO en este contexto documental. Cita los archivos de soporte. Contexto:\n{context}\nPregunta: {query}"
     return {"answer": model.generate_content(prompt).text, "sources": list(set([r[1] for r in results]))}
+

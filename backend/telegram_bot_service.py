@@ -16,6 +16,10 @@ if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN no está configurado en las variables de entorno (.env)")
     raise ValueError("TELEGRAM_BOT_TOKEN no configurado en el archivo .env")
 
+# Enmascarar token en logs para seguridad
+masked_token = BOT_TOKEN[:6] + "..." + BOT_TOKEN[-4:] if len(BOT_TOKEN) > 10 else "***"
+logger.info(f"Iniciando servicio de Telegram Bot con token seguro: {masked_token}")
+
 N8N_WEBHOOK = os.getenv("N8N_TELEGRAM_RAG_WEBHOOK_URL", "http://localhost:5678/webhook/telegram-rag")
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -80,10 +84,15 @@ def query_rag_via_n8n(chat_id: int, user_name: str, query: str) -> str:
 def query_rag_fallback(query: str) -> str:
     """Fallback directo a FastAPI si n8n no responde"""
     try:
+        service_pwd = os.getenv("N8N_SERVICE_PASSWORD")
+        if not service_pwd:
+            logger.error("N8N_SERVICE_PASSWORD no configurado en .env para fallback directo")
+            return "El servicio temporalmente no puede procesar consultas. Contacte al administrador."
+
         # 1. Login
         login_data = json.dumps({
             "email": "n8n.service@gmail.com",
-            "password": os.getenv("N8N_SERVICE_PASSWORD", "n8n_secure_pwd_2026_xyz")
+            "password": service_pwd
         }).encode("utf-8")
         req_auth = urllib.request.Request(
             "http://127.0.0.1:8000/api/auth/login",

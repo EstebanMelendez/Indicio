@@ -1,7 +1,7 @@
 import os
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
-from app.models import Base, User
+from app.models import Base, User, Tenant
 from passlib.context import CryptContext
 from sqlalchemy.orm import sessionmaker
 
@@ -20,21 +20,35 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def run():
-    print("Creando usuario de servicio n8n...")
+    print("[SEGURIDAD] Configurando cuenta de servicio n8n con rol 'service'...")
     db = SessionLocal()
     try:
+        tenant = db.query(Tenant).filter(Tenant.id == 1).first()
+        if not tenant:
+            tenant = Tenant(id=1, name="Organización Principal")
+            db.add(tenant)
+            db.commit()
+
         email = "n8n.service@gmail.com"
         user = db.query(User).filter(User.email == email).first()
         hashed = pwd_context.hash(N8N_PASSWORD)
         if not user:
-            new_user = User(email=email, hashed_password=hashed)
+            new_user = User(
+                email=email,
+                hashed_password=hashed,
+                role="service",
+                tenant_id=tenant.id
+            )
             db.add(new_user)
             db.commit()
-            print(f"Usuario de servicio '{email}' creado exitosamente.")
+            print(f"[OK] Usuario de servicio '{email}' creado con rol 'service' y tenant_id={tenant.id}.")
         else:
             user.hashed_password = hashed
+            user.role = "service"
+            if user.tenant_id is None:
+                user.tenant_id = tenant.id
             db.commit()
-            print(f"Contraseña actualizada para el usuario de servicio '{email}'.")
+            print(f"[OK] Usuario de servicio '{email}' actualizado con rol 'service'.")
     finally:
         db.close()
 

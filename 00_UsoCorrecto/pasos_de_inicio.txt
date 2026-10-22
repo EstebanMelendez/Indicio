@@ -16,14 +16,14 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    > cd backend
    > venv\Scripts\activate
    > python migration_vacancies.py (Crea la tabla de vacantes y actualiza el esquema RAG de Hojas de Vida)
-   > python create_admin.py        (Crea el admin: indicio.admin@gmail.com / admin123)
-   > python create_n8n_user.py     (Crea el usuario para n8n: n8n.service@gmail.com usando la contraseña del .env)
+   > python create_admin.py        (Crea el admin y auditor con roles asignados: 'admin' y 'auditor')
+   > python create_n8n_user.py     (Crea el usuario de servicio 'n8n.service@gmail.com' con rol 'service')
 
-3. ENCENDER EL BACKEND (FastAPI / IA)
+3. ENCENDER EL BACKEND (FastAPI / IA / Criptografía)
    ---------------------------------
    En la misma terminal del backend, con el entorno virtual activado:
    > uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   (El backend quedará escuchando en el puerto 8000, listo para procesar documentos).
+   (El backend quedará escuchando en el puerto 8000 con cifrado de datos sensibles y RBAC activado).
 
 4. ENCENDER EL FRONTEND (React / Vite)
    ---------------------------------
@@ -38,12 +38,19 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    Asegúrate de que los Workflows de "Ingesta" y "Notificaciones" estén activados (en ON).
    Esto permitirá que el sistema reciba correos automáticamente y responda al terminar.
 
-6. ACCESO ADMINISTRATIVO
+6. ACCESO AL SISTEMA POR ROLES
    ---------------------------------
-   Abre el frontend en tu navegador e inicia sesión con:
-   Email: indicio.admin@gmail.com
-   Pass:  admin123
-   (Aquí podrás ver todos los documentos procesados por la IA).
+   Abre el frontend en tu navegador (http://localhost:5173):
+
+   A. Modo Administrador (Acceso total):
+      Email: indicio.admin@gmail.com
+      Pass:  admin123
+      Permisos: Cargar, eliminar, editar vacantes, carpetas y ver logs de auditoría.
+
+   B. Modo Auditor (Solo Lectura y Verificación):
+      Email: indicio.auditor@gmail.com
+      Pass:  auditor123
+      Permisos: Consultar estadísticas, documentos, visor RAG y trazas de auditoría (sin permisos de eliminación).
 
 7. ASISTENTE RAG POR TELEGRAM (@Indicion8n_bot)
    ---------------------------------

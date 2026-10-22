@@ -112,8 +112,56 @@ Este flujo se encarga de avisar al usuario cuando el procesamiento de IA ha term
 
 ---
 
-## 📝 Documentación
-Puedes encontrar la documentación completa de cada fase del proyecto dentro de la carpeta `documentos/`. Si deseas agregar nuevos archivos, colócalos en su respectiva subcarpeta y súbelos a Git.
+## 🎯 Módulo de Selección y Headhunting IA (Vacantes y Hojas de Vida)
+
+Indicio Enterprise cuenta con un subsistema especializado para el reclutamiento de talento humano y análisis automático de Hojas de Vida (CVs):
+1. **Gestión de Vacantes:** Permite publicar ofertas laborales definiendo descripción, requisitos excluyentes, años mínimos de experiencia y competencias técnicas (`required_skills`). Cada vacante es vectorizada semánticamente (vector denso de 768 dimensiones).
+2. **Emparejamiento Híbrido Multivacante (Nivel 3):**
+   - Cuando se carga una hoja de vida (vía web o correo n8n), el sistema calcula automáticamente la cercanía vectorial contra las vacantes abiertas del inquilino y asigna la más afín.
+   - Aplica una fórmula híbrida de evaluación:
+     $$\text{Score Final} = (0.65 \times \text{Score Gemini LLM}) + (0.35 \times \text{Score Semántico Coseno})$$
+   - Extrae automáticamente: `matched_skills`, `missing_skills`, `experience_gap`, fortalezas (`green_flags`), alertas (`red_flags`) y un resumen técnico de scouting.
+3. **Disparador Webhook para RRHH:** Al finalizar el procesamiento de un CV calificado, se dispara un webhook hacia n8n (`/webhook/hr-scouting`) para alertar al equipo de contratación.
+
+---
+
+## 📱 Asistente RAG Móvil por Telegram (@Indicion8n_bot)
+
+Para auditoría y consulta remota desde dispositivos móviles, la plataforma integra un bot oficial de Telegram:
+- **Ejecución:**
+  ```bash
+  cd backend
+  venv\Scripts\activate
+  python telegram_bot_service.py
+  ```
+- **Capacidades:** Permite realizar preguntas en lenguaje natural sobre cualquier documento de la empresa (facturas, contratos o candidatos).
+- **Arquitectura Resiliente:** El bot consulta prioritariamente el flujo RAG de n8n (`/webhook/telegram-rag`), y ante cualquier desconexión temporal del orquestador, activa automáticamente un fallback directo a la API de FastAPI (`/api/rag/query`) autenticándose con el usuario de servicio.
+
+---
+
+## 🏢 Arquitectura Multi-Inquilino (Multi-Tenant) y Carpetas
+
+- **Aislamiento de Datos:** Cada inquilino (`Tenant`) cuenta con sus propios usuarios, vacantes, carpetas y documentos aislados a nivel relacional en PostgreSQL.
+- **Particionado Físico de Archivos:** Las cargas se segregan en disco bajo la ruta estructurada `backend/storage/tenant_{tenant_id}/{filename}` para garantizar privacidad y prevenir colisiones.
+- **Carpetas Virtuales:** Organización modular de documentos, incluyendo carpetas creadas por el usuario y carpetas automáticas del sistema (ej. *Bandeja n8n*).
+
+---
+
+## 📝 Documentación del Proyecto
+
+El proyecto dispone de un compendio formal de ingeniería de software en la carpeta `documentos/`:
+- **Documento Maestro de Arquitectura y Diseño Actualizado (v2.0):**  
+  👉 Consulta [`documentos/02_Diseno/ARQUITECTURA_Y_DISENO_ACTUALIZADO.md`](documentos/02_Diseno/ARQUITECTURA_Y_DISENO_ACTUALIZADO.md) para ver los diagramas Mermaid actualizados, el esquema Entidad-Relación completo, el catálogo de endpoints REST y la memoria técnica detallada.
+- **Documentos de Fases (Ciclo de Vida):**
+  - `documentos/00_UsoCorrecto/pasos_de_inicio.txt`: Guía rápida de arranque.
+  - `documentos/01_Analisis/`: Documento de análisis de requerimientos y casos de uso.
+  - `documentos/02_Diseno/`: Especificaciones de arquitectura y base de datos.
+  - `documentos/03_Desarrollo/`: Estructura del código y servicios REST.
+  - `documentos/04_Pruebas/`: Casos de prueba y matriz de verificación.
+  - `documentos/05_Implementacion/`: Guía de despliegue y puesta en marcha.
+  - `documentos/06_Manual_Usuario/`: Manual de usuario de la interfaz gráfica.
+  - `documentos/07_Manual_Tecnico/`: Manual de administración técnica y mantenimiento.
+  - `documentos/08_Trazabilidad/`: Matriz integral de trazabilidad.
 
 ## 🤝 Contribución
-Al realizar cambios importantes, recuerda actualizar el esquema de base de datos o agregar scripts de migración, así como documentar los nuevos componentes en este README si es necesario.
+Al realizar cambios importantes, recuerda actualizar el esquema de base de datos o agregar scripts de migración, así como documentar los nuevos componentes en este README y en la documentación técnica de diseño.

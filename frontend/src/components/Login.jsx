@@ -1,6 +1,6 @@
-import { MessageSquare } from 'lucide-react';
 import { useState } from 'react';
 import { authAPI } from '../services/api';
+import brandLogo from '../assets/brand_logo.png';
 
 export default function Login({ onLoginSuccess }) {
   const [loginUser, setLoginUser] = useState('');
@@ -15,6 +15,9 @@ export default function Login({ onLoginSuccess }) {
         email: loginUser,
         password: loginPass
       });
+      if (res.data.role) {
+        sessionStorage.setItem('role', res.data.role);
+      }
       onLoginSuccess(res.data.access_token);
     } catch (err) {
       setLoginError('Usuario o contraseña incorrectos');
@@ -24,11 +27,10 @@ export default function Login({ onLoginSuccess }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-blue-800 to-slate-900 flex flex-col justify-center items-center p-4 font-sans">
       <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border border-slate-100">
-        <div className="flex items-center justify-center mb-8">
-          <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
-            <MessageSquare className="w-8 h-8 text-white" />
-          </div>
-          <h1 className="text-3xl font-black ml-3 text-slate-800 tracking-tight">Indicio</h1>
+        <div className="flex flex-col items-center justify-center mb-6">
+          <img src={brandLogo} alt="Logo" className="w-20 h-20 object-contain mb-3 drop-shadow-md" />
+          <h1 className="text-3xl font-black text-slate-800 tracking-tight">Indicio</h1>
+          <p className="text-xs text-slate-400 font-semibold tracking-wide uppercase mt-0.5">Enterprise Edition</p>
         </div>
         <h2 className="text-xl font-bold text-center text-slate-700 mb-6">Iniciar Sesión</h2>
         {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg mb-4 text-sm font-medium border border-red-100 text-center">{loginError}</div>}

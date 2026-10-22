@@ -1,17 +1,59 @@
-# Backend
+# Entornos virtuales
 backend/venv/
+venv/
+.venv/
+
+# Caches y compilados
 backend/__pycache__/
-backend/.env
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables de entorno y secretos
 .env
 *.env
 .env.*
-*.pyc
-*.pyo
+backend/.env
+frontend/.env
+!backend/.env.example
+
+# Llaves criptográficas y certificados
+backend/keys/
+keys/
+*.pem
+*.key
+*.pub
+*.crt
+*.cert
+*.p12
+*.pfx
+
+# Almacenamiento local de archivos y documentos procesados
 backend/storage/
+storage/
 
-# Node
+# Volcados de Base de Datos y Backups
+*.dump
+*.sql
+*.tar.gz
+backups/
+
+# Logs del sistema
+*.log
+backend/*.log
+uvicorn.log
+
+# Node & Frontend
 node_modules/
+frontend/node_modules/
+frontend/dist/
 
-# OS generated files
+# Archivos del Sistema Operativo
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Archivos temporales o de prueba
+*.tmp
+prueba.txt
