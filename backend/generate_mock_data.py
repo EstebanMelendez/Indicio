@@ -4,8 +4,9 @@ from datetime import datetime, timedelta
 from docx import Document
 from fpdf import FPDF
 
-# Crear carpeta si no existe
-os.makedirs("storage", exist_ok=True)
+# Carpeta particionada multi-tenant por defecto (Tenant 1)
+TARGET_DIR = os.path.join("storage", "tenant_1")
+os.makedirs(TARGET_DIR, exist_ok=True)
 
 # Datos semilla realistas para el contexto
 empresas = ["Supermercados Mas por Menos", "Alkosto", "Calzatodo", "Cinemark", "Mercado Libre", "SHEIN", "Temu"]
@@ -36,7 +37,7 @@ for i in range(1, 11):
     
     contenido = f"FACTURA ELECTRONICA DE VENTA No. FAC-{i*100}\nFecha: {random_date()}\n\nEMISOR:\nRazon Social: {empresa}\nNIT: {random.randint(800,900)}.{random.randint(100,999)}.123-1\n\nDETALLE:\n1x {item} - $ {valor:,} COP\n\nVALOR TOTAL: $ {valor:,} COP"
     
-    with open(f"storage/factura_{i:02d}.txt", "w", encoding="utf-8") as f:
+    with open(os.path.join(TARGET_DIR, f"factura_{i:02d}.txt"), "w", encoding="utf-8") as f:
         f.write(contenido)
 
 # 2. Generar 10 Contratos en .DOCX (Word)
@@ -57,7 +58,7 @@ for i in range(1, 11):
     doc.add_heading('VALOR:', level=1)
     doc.add_paragraph(f'El valor acordado es de $ {random.randint(1, 15)}.000.000 COP.')
     
-    doc.save(f"storage/contrato_{i:02d}.docx")
+    doc.save(os.path.join(TARGET_DIR, f"contrato_{i:02d}.docx"))
 
 # 3. Generar 10 Hojas de Vida en .PDF
 for i in range(1, 11):
@@ -89,6 +90,6 @@ for i in range(1, 11):
     add_text("CONTACTO:", is_bold=True)
     add_text(f"Telefono: 31{random.randint(1000000, 9999999)}\nUbicacion: Bucaramanga, Santander.")
     
-    pdf.output(f"storage/hojavida_{i:02d}.pdf")
+    pdf.output(os.path.join(TARGET_DIR, f"hojavida_{i:02d}.pdf"))
 
-print("¡Éxito! Se crearon 10 TXT, 10 DOCX y 10 PDF en la carpeta 'storage'.")
+print(f"¡Éxito! Se crearon 10 TXT, 10 DOCX y 10 PDF en '{TARGET_DIR}'.")

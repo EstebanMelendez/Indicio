@@ -383,6 +383,7 @@ def get_vacancy_detail(
         return 0.0
         
     sorted_candidates = sorted(candidates, key=get_score, reverse=True)
+    user_role = getattr(current_user, "role", "user") or "user"
     
     return {
         "id": vac.id,
@@ -394,7 +395,7 @@ def get_vacancy_detail(
         "required_skills": vac.required_skills or [],
         "status": vac.status,
         "created_at": vac.created_at,
-        "candidates": sorted_candidates
+        "candidates": [serialize_document(c, user_role) for c in sorted_candidates]
     }
 
 @app.put("/api/vacancies/{vacancy_id}")
@@ -511,7 +512,26 @@ def match_document_to_vacancy(
         extracted["vacancy_title"] = vac.title
 
     doc.vacancy_id = vac.id
-    doc.extracted_data = extracted
+    doc.extracted_data = {
+        "_encrypted_data": encrypt_sensitive_data(extracted),
+        "match_score": extracted.get("match_score") if isinstance(extracted, dict) else None,
+        "gemini_score": extracted.get("gemini_score") if isinstance(extracted, dict) else None,
+        "semantic_score": extracted.get("semantic_score") if isinstance(extracted, dict) else None,
+        "postulante": extracted.get("postulante") if isinstance(extracted, dict) else None,
+        "rol": extracted.get("rol") if isinstance(extracted, dict) else None,
+        "anos_experiencia": extracted.get("anos_experiencia") if isinstance(extracted, dict) else None,
+        "total": (extracted.get("monto_total") or extracted.get("total")) if isinstance(extracted, dict) else None,
+        "monto_total": (extracted.get("monto_total") or extracted.get("total")) if isinstance(extracted, dict) else None,
+        "proveedor": (extracted.get("emisor_nombre") or extracted.get("proveedor")) if isinstance(extracted, dict) else None,
+        "emisor_nombre": (extracted.get("emisor_nombre") or extracted.get("proveedor")) if isinstance(extracted, dict) else None,
+        "emisor_nit": extracted.get("emisor_nit") if isinstance(extracted, dict) else None,
+        "numero_factura": extracted.get("numero_factura") if isinstance(extracted, dict) else None,
+        "moneda": extracted.get("moneda") if isinstance(extracted, dict) else None,
+        "fecha_vencimiento": extracted.get("fecha_vencimiento") if isinstance(extracted, dict) else None,
+        "matched_skills": extracted.get("matched_skills") if isinstance(extracted, dict) else None,
+        "missing_skills": extracted.get("missing_skills") if isinstance(extracted, dict) else None,
+        "resumen_scouting": extracted.get("resumen_scouting") if isinstance(extracted, dict) else None
+    }
     flag_modified(doc, "extracted_data")
     db.commit()
     db.refresh(doc)
@@ -761,14 +781,24 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                 extracted["vacancy_title"] = target_vacancy.title
             
         # Cifrado de datos sensibles en PostgreSQL (Cifrado en reposo)
+        # Se preservan claves de auditoría e indexación para consultas SQL en n8n y dashboards
         doc.extracted_data = {
             "_encrypted_data": encrypt_sensitive_data(extracted),
             "match_score": extracted.get("match_score") if isinstance(extracted, dict) else None,
             "postulante": extracted.get("postulante") if isinstance(extracted, dict) else None,
             "rol": extracted.get("rol") if isinstance(extracted, dict) else None,
             "anos_experiencia": extracted.get("anos_experiencia") if isinstance(extracted, dict) else None,
-            "total": extracted.get("total") if isinstance(extracted, dict) else None,
-            "proveedor": extracted.get("proveedor") if isinstance(extracted, dict) else None
+            "total": (extracted.get("monto_total") or extracted.get("total")) if isinstance(extracted, dict) else None,
+            "monto_total": (extracted.get("monto_total") or extracted.get("total")) if isinstance(extracted, dict) else None,
+            "proveedor": (extracted.get("emisor_nombre") or extracted.get("proveedor")) if isinstance(extracted, dict) else None,
+            "emisor_nombre": (extracted.get("emisor_nombre") or extracted.get("proveedor")) if isinstance(extracted, dict) else None,
+            "emisor_nit": extracted.get("emisor_nit") if isinstance(extracted, dict) else None,
+            "numero_factura": extracted.get("numero_factura") if isinstance(extracted, dict) else None,
+            "moneda": extracted.get("moneda") if isinstance(extracted, dict) else None,
+            "fecha_vencimiento": extracted.get("fecha_vencimiento") if isinstance(extracted, dict) else None,
+            "matched_skills": extracted.get("matched_skills") if isinstance(extracted, dict) else None,
+            "missing_skills": extracted.get("missing_skills") if isinstance(extracted, dict) else None,
+            "resumen_scouting": extracted.get("resumen_scouting") if isinstance(extracted, dict) else None
         }
 
         doc.status = "Procesado"
@@ -956,14 +986,25 @@ def update_document(
     if update_data.status is not None:
         doc.status = update_data.status
     if update_data.extracted_data is not None:
-        # Cifrar antes de guardar
+        raw = update_data.extracted_data
         doc.extracted_data = {
-            "_encrypted_data": encrypt_sensitive_data(update_data.extracted_data),
-            "match_score": update_data.extracted_data.get("match_score"),
-            "postulante": update_data.extracted_data.get("postulante"),
-            "rol": update_data.extracted_data.get("rol"),
-            "total": update_data.extracted_data.get("total"),
-            "proveedor": update_data.extracted_data.get("proveedor")
+            "_encrypted_data": encrypt_sensitive_data(raw),
+            "match_score": raw.get("match_score"),
+            "postulante": raw.get("postulante"),
+            "rol": raw.get("rol"),
+            "anos_experiencia": raw.get("anos_experiencia"),
+            "total": (raw.get("monto_total") or raw.get("total")),
+            "monto_total": (raw.get("monto_total") or raw.get("total")),
+            "proveedor": (raw.get("emisor_nombre") or raw.get("proveedor")),
+            "emisor_nombre": (raw.get("emisor_nombre") or raw.get("proveedor")),
+            "emisor_nit": raw.get("emisor_nit"),
+            "numero_factura": raw.get("numero_factura"),
+            "moneda": raw.get("moneda"),
+            "fecha_vencimiento": raw.get("fecha_vencimiento"),
+            "matched_skills": raw.get("matched_skills"),
+            "missing_skills": raw.get("missing_skills"),
+            "resumen_scouting": raw.get("resumen_scouting"),
+            "estado_contable": raw.get("estado_contable")
         }
         
     db.commit()
@@ -1017,8 +1058,18 @@ def update_document_from_n8n(
         "match_score": updated_data.get("match_score"),
         "postulante": updated_data.get("postulante"),
         "rol": updated_data.get("rol"),
-        "total": updated_data.get("total"),
-        "proveedor": updated_data.get("proveedor"),
+        "anos_experiencia": updated_data.get("anos_experiencia"),
+        "total": (updated_data.get("monto_total") or updated_data.get("total")),
+        "monto_total": (updated_data.get("monto_total") or updated_data.get("total")),
+        "proveedor": (updated_data.get("emisor_nombre") or updated_data.get("proveedor")),
+        "emisor_nombre": (updated_data.get("emisor_nombre") or updated_data.get("proveedor")),
+        "emisor_nit": updated_data.get("emisor_nit"),
+        "numero_factura": updated_data.get("numero_factura"),
+        "moneda": updated_data.get("moneda"),
+        "fecha_vencimiento": updated_data.get("fecha_vencimiento"),
+        "matched_skills": updated_data.get("matched_skills"),
+        "missing_skills": updated_data.get("missing_skills"),
+        "resumen_scouting": updated_data.get("resumen_scouting"),
         "estado_contable": payload.payment_status
     }
     flag_modified(doc, "extracted_data")
@@ -1054,35 +1105,42 @@ class RagQueryRequest(BaseModel):
 
 @app.post("/api/rag/query")
 def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query = payload.query
-    q_emb = genai.embed_content(model=MODEL_EMB, content=query, task_type="retrieval_query", output_dimensionality=768)['embedding']
-    
-    dist_expr = DocumentChunk.embedding.cosine_distance(q_emb)
-    
-    # Aislamiento multi-tenant estricto: solo chunks de documentos de este tenant
-    base_query = db.query(DocumentChunk.chunk_text, Document.filename, dist_expr.label("dist")) \
-                .join(Document, DocumentChunk.document_id == Document.id) \
-                .filter(Document.tenant_id == current_user.tenant_id, dist_expr < 0.4)
-                
-    if payload.document_ids:
-        # Validar que los document_ids pertenezcan exclusivamente a este tenant
-        valid_ids = [r[0] for r in db.query(Document.id).filter(
-            Document.id.in_(payload.document_ids), 
-            Document.tenant_id == current_user.tenant_id
-        ).all()]
-        if valid_ids:
-            base_query = base_query.filter(Document.id.in_(valid_ids))
+    try:
+        query = payload.query
+        q_emb = genai.embed_content(model=MODEL_EMB, content=query, task_type="retrieval_query", output_dimensionality=768)['embedding']
+        
+        dist_expr = DocumentChunk.embedding.cosine_distance(q_emb)
+        
+        # Aislamiento multi-tenant estricto: solo chunks de documentos de este tenant
+        base_query = db.query(DocumentChunk.chunk_text, Document.filename, dist_expr.label("dist")) \
+                    .join(Document, DocumentChunk.document_id == Document.id) \
+                    .filter(Document.tenant_id == current_user.tenant_id)
+                    
+        if payload.document_ids:
+            # Validar que los document_ids pertenezcan exclusivamente a este tenant
+            valid_ids = [r[0] for r in db.query(Document.id).filter(
+                Document.id.in_(payload.document_ids), 
+                Document.tenant_id == current_user.tenant_id
+            ).all()]
+            if valid_ids:
+                base_query = base_query.filter(Document.id.in_(valid_ids), dist_expr < 0.6)
+            else:
+                return {"answer": "Los documentos seleccionados no pertenecen a tu organización.", "sources": []}
         else:
-            return {"answer": "Los documentos seleccionados no pertenecen a tu organización.", "sources": []}
+            base_query = base_query.filter(dist_expr < 0.45)
+            
+        results = base_query.order_by(dist_expr).limit(4).all()
+                    
+        if not results:
+            return {"answer": "No encontré información relevante en los documentos de tu organización para responder a tu pregunta.", "sources": []}
+            
+        context = "\n".join([f"Archivo {r[1]}: {r[0]}" for r in results])
         
-    results = base_query.order_by(dist_expr).limit(4).all()
-                
-    if not results:
-        return {"answer": "No encontré información relevante en los documentos de tu organización para responder a tu pregunta.", "sources": []}
-        
-    context = "\n".join([f"Archivo {r[1]}: {r[0]}" for r in results])
-    
-    model = genai.GenerativeModel(MODEL_TEXT)
-    prompt = f"Responde la pregunta basándote SOLO en este contexto documental. Cita los archivos de soporte. Contexto:\n{context}\nPregunta: {query}"
-    return {"answer": model.generate_content(prompt).text, "sources": list(set([r[1] for r in results]))}
+        model = genai.GenerativeModel(MODEL_TEXT)
+        prompt = f"Responde la pregunta basándote SOLO en este contexto documental. Cita los archivos de soporte. Contexto:\n{context}\nPregunta: {query}"
+        return {"answer": model.generate_content(prompt).text, "sources": list(set([r[1] for r in results]))}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"RAG Error: {str(e)}")
 

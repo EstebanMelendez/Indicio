@@ -105,7 +105,10 @@ export default function Repository({ folders, documents, fetchData }) {
   }
 
   // Filtrado final en memoria (solo para separar por carpeta)
+  const hasActiveFilters = Boolean(searchFilter || categoryFilter || statusFilter || dateFilter);
+
   const displayDocs = filteredDocs.filter(doc => {
+    if (hasActiveFilters) return true; // Búsqueda global a través de todas las carpetas si hay filtros activos
     const isFolderMatch = currentFolder ? doc.folder_id === currentFolder.id : doc.folder_id === null;
     return isFolderMatch;
   });
