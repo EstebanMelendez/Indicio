@@ -80,6 +80,7 @@ class Document(Base):
     summary = Column(Text, nullable=True)
     extracted_data = Column(JSONB, nullable=True)
     error_log = Column(Text, nullable=True)
+    uploaded_by = Column(String(255), nullable=True) # Correo o ID de quien subió el archivo
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="documents")
@@ -97,6 +98,24 @@ class DocumentChunk(Base):
     embedding = Column(Vector(768), nullable=False)
 
     document = relationship("Document", back_populates="chunks")
+
+class WorkflowAuditLog(Base):
+    __tablename__ = "workflow_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    workflow_name = Column(String(100), nullable=False) # ej: "CuentasPorPagar", "ChatbotRAG", "Headhunter"
+    trigger_source = Column(String(50), nullable=False) # ej: "WebUpload", "TelegramBot", "EmailIngest"
+    user_email = Column(String(255), nullable=True)
+    ai_provider = Column(String(50), default="Gemini 2.0 Flash") # ej: "Gemini 2.0 Flash", "Groq-Llama3", "Plan B"
+    input_summary = Column(Text, nullable=True) # Resumen o preview de entrada
+    output_result = Column(JSONB, nullable=True) # Decisión, estado, o respuesta
+    confidence_score = Column(BigInteger, nullable=True) # Nivel de confianza si aplica (0-100)
+    status = Column(String(50), default="SUCCESS") # "SUCCESS", "ERROR", "REQUIRES_REVIEW", "FALLBACK_USED"
+    error_message = Column(Text, nullable=True)
+    execution_time_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 from sqlalchemy import Index
 Index('ix_document_chunks_embedding', DocumentChunk.embedding, 

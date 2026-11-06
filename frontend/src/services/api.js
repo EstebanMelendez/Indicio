@@ -33,9 +33,11 @@ export const authAPI = {
 
 export const documentAPI = {
   getAll: (params) => api.get('/documents', { params }),
+  getById: (id) => api.get(`/documents/${id}`),
   upload: (data) => api.post('/documents/upload', data, {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
+  confirmVision: (id, data) => api.post(`/documents/${id}/confirm-vision`, data),
   delete: (id) => api.delete(`/documents/${id}`),
   download: (id) => api.get(`/documents/${id}/download`, { responseType: 'blob' }),
 };
@@ -50,8 +52,13 @@ export const dashboardAPI = {
   getStats: () => api.get('/dashboard/stats'),
 };
 
+export const auditAPI = {
+  getLogs: (params) => api.get('/audit/logs', { params }),
+};
+
 export const ragAPI = {
-  query: (queryStr, docIds = []) => api.post('/rag/query', { query: queryStr, document_ids: docIds }),
+  query: (queryStr, docIds = [], sessionId = 'web-default') =>
+    api.post('/rag/query', { query: queryStr, document_ids: docIds, session_id: sessionId }),
 };
 
 export const vacancyAPI = {

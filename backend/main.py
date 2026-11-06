@@ -15,7 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db, engine, Base
-from app.models import Document, DocumentChunk, Folder, User, BlacklistedToken, Vacancy
+from app.models import Document, DocumentChunk, Folder, User, BlacklistedToken, Vacancy, WorkflowAuditLog
+from app.workflows.invoice_workflow import execute_invoice_workflow
+from app.workflows.rag_agent import execute_rag_with_memory
+from app.vision_service import is_image_file, analyze_invoice_image
 from app.auth import get_current_user, create_access_token, verify_password, oauth2_scheme, require_role
 from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log
 from app.notifications import notify_document_status
@@ -35,8 +38,8 @@ if gemini_key:
 else:
     logger.warning("[SEGURIDAD CRÍTICA] GEMINI_API_KEY no encontrada en las variables de entorno.")
 
-MODEL_TEXT = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
-MODEL_EMB = os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-005")
+MODEL_TEXT = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
+MODEL_EMB = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2")
 
 app = FastAPI(title="Indicio Enterprise", description="Plataforma Segura de Gestión Documental Inteligente y RAG")
 
@@ -54,10 +57,13 @@ from sqlalchemy import text
 def startup_db_check():
     """Garantiza la consistencia automática del esquema de la base de datos al encender el backend"""
     try:
+        # Crea todas las tablas que no existan, incluyendo workflow_audit_logs
+        Base.metadata.create_all(bind=engine)
         with engine.connect() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user';"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;"))
+            conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);"))
             conn.commit()
         logger.info("[SEGURIDAD] Verificación y migración de esquema completada exitosamente.")
     except Exception as e:
@@ -95,6 +101,7 @@ def serialize_document(doc: Document, user_role: str) -> dict:
         "summary": doc.summary,
         "extracted_data": data,
         "error_log": error_log,
+        "uploaded_by": getattr(doc, "uploaded_by", None),
         "created_at": doc.created_at,
         "tenant_id": doc.tenant_id
     }
@@ -146,17 +153,40 @@ def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
 def get_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     total = db.query(Document).filter(Document.tenant_id == current_user.tenant_id).count()
     processed = db.query(Document).filter(Document.tenant_id == current_user.tenant_id, Document.status == "Procesado").count()
+    needs_review = db.query(Document).filter(Document.tenant_id == current_user.tenant_id, Document.status == "Requiere Revisión").count()
     errors = db.query(Document).filter(Document.tenant_id == current_user.tenant_id, Document.status == "Error").count()
     
+    all_docs = db.query(Document.filename).filter(Document.tenant_id == current_user.tenant_id).all()
+    vision_count = sum(1 for (fname,) in all_docs if fname and is_image_file(fname))
+
     categories_query = db.query(Document.category, func.count(Document.id)).filter(Document.tenant_id == current_user.tenant_id).group_by(Document.category).all()
     categories = {cat if cat else "Sin Clasificar": count for cat, count in categories_query}
     
     return {
         "total": total, 
         "processed": processed, 
+        "needs_review": needs_review,
+        "vision_count": vision_count,
         "errors": errors,
         "categories": categories
     }
+
+@app.get("/api/audit/logs")
+def get_audit_logs(
+    limit: int = 50,
+    workflow_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin", "auditor"]))
+):
+    """
+    Retorna el historial de ejecuciones y decisiones de automatización e IA.
+    Solo accesible para roles 'admin' y 'auditor' conforme a la Ley 1581 y requisitos de seguridad.
+    """
+    q = db.query(WorkflowAuditLog).filter(WorkflowAuditLog.tenant_id == current_user.tenant_id)
+    if workflow_name:
+        q = q.filter(WorkflowAuditLog.workflow_name == workflow_name)
+    logs = q.order_by(WorkflowAuditLog.created_at.desc()).limit(limit).all()
+    return logs
 
 class FolderCreate(BaseModel):
     name: str
@@ -473,11 +503,10 @@ def match_document_to_vacancy(
     semantic_score = calculate_semantic_similarity(vac.embedding, chunks)
     
     candidate_models = list(dict.fromkeys([
-        os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash"),
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
         "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite"
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash-lite")
     ]))
     vac_eval = evaluate_cv_against_vacancy(raw_text, vac, candidate_models)
     
@@ -560,108 +589,133 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
         doc.status = "Procesando"
         db.commit()
         
-        # 1. Extracción con validación
-        raw_text = extract_text(file_path, filename)
-        if not raw_text or len(raw_text.strip()) < 10:
-            raise ValueError("El documento está vacío o no se pudo extraer texto legible.")
-        
-        # 2. Clasificación con modelo dinámico y fallback ante límites de cuota (429)
-        prompt = f"""Analiza este documento y responde ESTRICTAMENTE en formato JSON válido, sin comillas invertidas ni markdown.
-        Clasifica obligatoriamente en una de estas categorías: "Facturas y Cuentas de Cobro", "Contratos y Acuerdos Legales", "Hojas de Vida / Perfiles Laborales", "Recibos y Comprobantes de Pago", "Reportes y Estados Financieros", "Actas de Reunión", "Manuales y Procedimientos" (o "Sin Clasificar" si no aplica ninguna).
-        El esquema debe ser:
-        {{
-            "category": "nombre de la categoria",
-            "summary": "resumen ejecutivo",
-            "extracted_data": {{
-                // Si es "Facturas y Cuentas de Cobro", usa OBLIGATORIAMENTE este esquema:
-                // "emisor_nombre": string (nombre del proveedor o emisor),
-                // "emisor_nit": string (NIT o identificación fiscal, o null si no aparece),
-                // "numero_factura": string (número o consecutivo de factura),
-                // "fecha_emision": string (YYYY-MM-DD o formato original),
-                // "fecha_vencimiento": string (YYYY-MM-DD o null si no especifica),
-                // "moneda": string (ej: "COP", "USD", "EUR"),
-                // "monto_subtotal": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1200000.00),
-                // "monto_impuestos": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 228000.00),
-                // "monto_total": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1428000.00),
-                // "concepto_principal": string (descripción breve del servicio o bien)
-
-                // Si es "Recibos y Comprobantes de Pago":
-                // "emisor_nombre": string,
-                // "receptor_nombre": string,
-                // "numero_recibo": string (o null),
-                // "fecha_pago": string,
-                // "moneda": string,
-                // "monto_total": number (numérico limpio float/int, sin símbolos ni puntos de miles),
-                // "concepto_principal": string,
-                // "metodo_pago": string (ej: "Transferencia", "Efectivo", o null)
-
-                // Si es "Contratos y Acuerdos Legales": "partes", "objeto", "vigencia", "valor".
-                // Si es "Hojas de Vida / Perfiles Laborales", usa OBLIGATORIAMENTE este esquema estructurado:
-                // "postulante": string (nombre completo del candidato),
-                // "rol": string (cargo o especialidad principal, ej: "Desarrollador Fullstack"),
-                // "anos_experiencia": number (años de experiencia laboral corporativa en número, ej: 4 o 1.5),
-                // "competencias": array de strings (tecnologías y habilidades clave, ej: ["React", "Azure", "GitHub", "Python"]),
-                // "formacion": string (educación, certificaciones o nivel académico),
-                // "contacto_telefono": string o null,
-                // "contacto_ubicacion": string o null (ciudad o país),
-                // "match_score": number (puntuación entera o decimal del 0 al 100 evaluando seniority, experiencia y solidez técnica),
-                // "green_flags": array de strings (principales 2 a 3 fortalezas del candidato),
-                // "resumen_scouting": string (síntesis ejecutiva de 2 líneas destacando el potencial del candidato)
-
-                // Si es "Reportes y Estados Financieros": "empresa", "periodo", "tipo_reporte", "ingresos", "gastos".
-                // Si es "Actas de Reunión": "fecha", "asistentes", "temas_tratados", "conclusiones".
-                // Si es "Manuales y Procedimientos": "titulo", "departamento", "proposito", "version".
-            }}
-        }}
-
-        REGLA ESTRICTA PARA MONTOS: Los campos 'monto_total', 'monto_subtotal' y 'monto_impuestos' deben ser EXCLUSIVAMENTE de tipo number (flotante o entero), NUNCA cadenas de texto, sin símbolos como '$', sin 'COP'/'USD' y sin separadores de miles con puntos. Ejemplo correcto: 1428000.00. Ejemplo incorrecto: "$ 1.428.000".
-
-        Documento: {raw_text[:8000]}"""
-
         candidate_models = list(dict.fromkeys([
-            os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash"),
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
             "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-lite"
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash-lite")
         ]))
-        
-        response = None
-        last_error = None
-        for model_name in candidate_models:
-            try:
-                curr_model = genai.GenerativeModel(model_name)
-                response = curr_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-                print(f"[OK] Documento analizado exitosamente con {model_name}")
-                break
-            except Exception as e:
-                last_error = e
-                err_str = str(e)
-                if "429" in err_str or "Quota exceeded" in err_str:
-                    print(f"[WARN] Limite de cuota alcanzado en {model_name}. Cambiando a modelo alternativo...")
-                    continue
-                else:
-                    print(f"[WARN] Error en {model_name}: {err_str[:80]}. Probando alternativo...")
-                    continue
 
-        if not response:
-            raise last_error or ValueError("No se pudo obtener respuesta de la IA.")
+        # =====================================================================
+        # RAMA A: VISIÓN POR COMPUTADOR (Imágenes .jpg, .jpeg, .png, .webp)
+        # =====================================================================
+        if is_image_file(filename):
+            vision_res = analyze_invoice_image(
+                file_path=file_path,
+                filename=filename,
+                db=db,
+                tenant_id=doc.tenant_id,
+                document_id=doc.id,
+                user_email=doc.uploaded_by or "sistema@indicio.internal",
+                trigger_source="VisionUpload"
+            )
+            doc.category = vision_res.get("category", "Facturas y Cuentas de Cobro")
+            doc.summary = vision_res.get("summary", "Factura procesada por Visión Computacional.")
+            extracted = vision_res.get("extracted_data", {})
+            raw_text = vision_res.get("raw_text", "") or doc.summary
+
+        # =====================================================================
+        # RAMA B: DOCUMENTOS DE TEXTO (.pdf, .docx, .txt)
+        # =====================================================================
+        else:
+            # 1. Extracción con validación
+            raw_text = extract_text(file_path, filename)
+            if not raw_text or len(raw_text.strip()) < 10:
+                raise ValueError("El documento está vacío o no se pudo extraer texto legible.")
             
-        raw_response = response.text.strip()
-        
-        # Limpieza por si Gemini insiste en enviar Markdown
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:-3].strip()
-        elif raw_response.startswith("```"):
-            raw_response = raw_response[3:-3].strip()
+            # 2. Clasificación con modelo dinámico y fallback ante límites de cuota (429)
+            prompt = f"""Analiza este documento y responde ESTRICTAMENTE en formato JSON válido, sin comillas invertidas ni markdown.
+            Clasifica obligatoriamente en una de estas categorías: "Facturas y Cuentas de Cobro", "Contratos y Acuerdos Legales", "Hojas de Vida / Perfiles Laborales", "Recibos y Comprobantes de Pago", "Reportes y Estados Financieros", "Actas de Reunión", "Manuales y Procedimientos" (o "Sin Clasificar" si no aplica ninguna).
+            El esquema debe ser:
+            {{
+                "category": "nombre de la categoria",
+                "summary": "resumen ejecutivo",
+                "extracted_data": {{
+                    // Si es "Facturas y Cuentas de Cobro", usa OBLIGATORIAMENTE este esquema:
+                    // "emisor_nombre": string (nombre del proveedor o emisor),
+                    // "emisor_nit": string (NIT o identificación fiscal, o null si no aparece),
+                    // "numero_factura": string (número o consecutivo de factura),
+                    // "fecha_emision": string (YYYY-MM-DD o formato original),
+                    // "fecha_vencimiento": string (YYYY-MM-DD o null si no especifica),
+                    // "moneda": string (ej: "COP", "USD", "EUR"),
+                    // "items": [ {{ "descripcion": string, "cantidad": number, "precio_unitario": number, "subtotal": number }} ],
+                    // "monto_subtotal": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1200000.00),
+                    // "monto_impuestos": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 228000.00),
+                    // "monto_total": number (numérico limpio float/int, sin símbolos $ ni puntos de miles, ej: 1428000.00),
+                    // "concepto_principal": string (descripción breve del servicio o bien),
+                    // "confidence_score": number (del 0 al 100 indicando la certeza de los datos extraídos, ej: 95)
+
+                    // Si es "Recibos y Comprobantes de Pago":
+                    // "emisor_nombre": string,
+                    // "receptor_nombre": string,
+                    // "numero_recibo": string (o null),
+                    // "fecha_pago": string,
+                    // "moneda": string,
+                    // "items": [ {{ "descripcion": string, "cantidad": number, "precio_unitario": number, "subtotal": number }} ],
+                    // "monto_total": number (numérico limpio float/int, sin símbolos ni puntos de miles),
+                    // "concepto_principal": string,
+                    // "metodo_pago": string (ej: "Transferencia", "Efectivo", o null),
+                    // "confidence_score": number (del 0 al 100)
+
+                    // Si es "Contratos y Acuerdos Legales": "partes", "objeto", "vigencia", "valor".
+                    // Si es "Hojas de Vida / Perfiles Laborales", usa OBLIGATORIAMENTE este esquema estructurado:
+                    // "postulante": string (nombre completo del candidato),
+                    // "rol": string (cargo o especialidad principal, ej: "Desarrollador Fullstack"),
+                    // "anos_experiencia": number (años de experiencia laboral corporativa en número, ej: 4 o 1.5),
+                    // "competencias": array de strings (tecnologías y habilidades clave, ej: ["React", "Azure", "GitHub", "Python"]),
+                    // "formacion": string (educación, certificaciones o nivel académico),
+                    // "contacto_telefono": string o null,
+                    // "contacto_ubicacion": string o null (ciudad o país),
+                    // "match_score": number (puntuación entera o decimal del 0 al 100 evaluando seniority, experiencia y solidez técnica),
+                    // "green_flags": array de strings (principales 2 a 3 fortalezas del candidato),
+                    // "resumen_scouting": string (síntesis ejecutiva de 2 líneas destacando el potencial del candidato)
+
+                    // Si es "Reportes y Estados Financieros": "empresa", "periodo", "tipo_reporte", "ingresos", "gastos".
+                    // Si es "Actas de Reunión": "fecha", "asistentes", "temas_tratados", "conclusiones".
+                    // Si es "Manuales y Procedimientos": "titulo", "departamento", "proposito", "version".
+                }}
+            }}
+
+            REGLA ESTRICTA PARA MONTOS: Los campos 'monto_total', 'monto_subtotal' y 'monto_impuestos' deben ser EXCLUSIVAMENTE de tipo number (flotante o entero), NUNCA cadenas de texto, sin símbolos como '$', sin 'COP'/'USD' y sin separadores de miles con puntos. Ejemplo correcto: 1428000.00. Ejemplo incorrecto: "$ 1.428.000".
+
+            Documento: {raw_text[:8000]}"""
+
+            response = None
+            last_error = None
+            for model_name in candidate_models:
+                try:
+                    curr_model = genai.GenerativeModel(model_name)
+                    response = curr_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                    print(f"[OK] Documento analizado exitosamente con {model_name}")
+                    break
+                except Exception as e:
+                    last_error = e
+                    err_str = str(e)
+                    if "429" in err_str or "Quota exceeded" in err_str:
+                        print(f"[WARN] Limite de cuota alcanzado en {model_name}. Cambiando a modelo alternativo...")
+                        continue
+                    else:
+                        print(f"[WARN] Error en {model_name}: {err_str[:80]}. Probando alternativo...")
+                        continue
+
+            if not response:
+                raise last_error or ValueError("No se pudo obtener respuesta de la IA.")
+                
+            raw_response = response.text.strip()
             
-        ai_data = json.loads(raw_response)
+            # Limpieza por si Gemini insiste en enviar Markdown
+            if raw_response.startswith("```json"):
+                raw_response = raw_response[7:-3].strip()
+            elif raw_response.startswith("```"):
+                raw_response = raw_response[3:-3].strip()
+                
+            ai_data = json.loads(raw_response)
+            
+            doc.category = ai_data.get("category", "Sin Clasificar")
+            doc.summary = ai_data.get("summary", "")
+            extracted = ai_data.get("extracted_data", {})
         
-        doc.category = ai_data.get("category", "Sin Clasificar")
-        doc.summary = ai_data.get("summary", "")
-        extracted = ai_data.get("extracted_data", {})
-        
-        # Sanitización defensiva de datos extraídos para garantizar compatibilidad total con n8n
+        # Sanitización defensiva de datos extraídos para garantizar compatibilidad total con n8n y LangGraph
         if isinstance(extracted, dict):
             for k in ["monto_total", "monto_subtotal", "monto_impuestos"]:
                 if k in extracted and extracted[k] is not None:
@@ -688,6 +742,15 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                         extracted["match_score"] = float(extracted["match_score"])
                 except Exception:
                     extracted["match_score"] = 80.0
+
+            if "confidence_score" in extracted and extracted["confidence_score"] is not None:
+                try:
+                    c_val = float(extracted["confidence_score"])
+                    if 0 < c_val <= 1.0:
+                        c_val = round(c_val * 100.0, 1)
+                    extracted["confidence_score"] = round(c_val, 1)
+                except Exception:
+                    extracted["confidence_score"] = 90.0
 
             if "anos_experiencia" in extracted and extracted["anos_experiencia"] is not None:
                 try:
@@ -794,15 +857,43 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
             "emisor_nombre": (extracted.get("emisor_nombre") or extracted.get("proveedor")) if isinstance(extracted, dict) else None,
             "emisor_nit": extracted.get("emisor_nit") if isinstance(extracted, dict) else None,
             "numero_factura": extracted.get("numero_factura") if isinstance(extracted, dict) else None,
+            "fecha_emision": extracted.get("fecha_emision") if isinstance(extracted, dict) else None,
             "moneda": extracted.get("moneda") if isinstance(extracted, dict) else None,
             "fecha_vencimiento": extracted.get("fecha_vencimiento") if isinstance(extracted, dict) else None,
+            "items": extracted.get("items") if isinstance(extracted, dict) else None,
+            "confidence_score": extracted.get("confidence_score") if isinstance(extracted, dict) else None,
+            "low_confidence_reason": extracted.get("low_confidence_reason") if isinstance(extracted, dict) else None,
+            "processed_by_vision": extracted.get("processed_by_vision") if isinstance(extracted, dict) else False,
             "matched_skills": extracted.get("matched_skills") if isinstance(extracted, dict) else None,
             "missing_skills": extracted.get("missing_skills") if isinstance(extracted, dict) else None,
             "resumen_scouting": extracted.get("resumen_scouting") if isinstance(extracted, dict) else None
         }
 
-        doc.status = "Procesado"
-        print(f"[OK] Exito procesando: {filename}")
+        # Verificar umbral de confianza (< 80% -> Requiere Revisión Humana)
+        conf_score = extracted.get("confidence_score") if isinstance(extracted, dict) else None
+        is_invoice = doc.category and any(k in doc.category for k in ["Factura", "Recibo", "Cobro"])
+
+        if is_invoice and conf_score is not None and float(conf_score) < 80.0:
+            doc.status = "Requiere Revisión"
+            print(f"[VISION] Confianza baja ({conf_score}%) en {filename} -> Estado: Requiere Revisión")
+        else:
+            doc.status = "Procesado"
+            print(f"[OK] Exito procesando: {filename}")
+
+        # Si el documento procesado es una Factura o Recibo, disparar el motor contable en código (LangGraph)
+        if is_invoice:
+            try:
+                wf_res = execute_invoice_workflow(
+                    db=db,
+                    document=doc,
+                    user_email=doc.uploaded_by or "sistema@indicio.internal",
+                    trigger_source="VisionProcessor" if is_image_file(filename) else "BackgroundProcessor"
+                )
+                # Si la confianza fue < 80%, asegurar que el documento quede en estado "Requiere Revisión"
+                if conf_score is not None and float(conf_score) < 80.0:
+                    doc.status = "Requiere Revisión"
+            except Exception as w_err:
+                print(f"[WARN] Error ejecutando invoice_workflow en código: {w_err}")
 
     except Exception as e:
         doc.status = "Error"
@@ -811,7 +902,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
     
     finally:
         db.commit()
-        if doc and doc.status in ["Procesado", "Error"]:
+        if doc and doc.status in ["Procesado", "Requiere Revisión", "Error"]:
             notify_document_status(doc)
         db.close()
 
@@ -825,12 +916,15 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["admin", "user", "service"]))
 ):
-    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".jpg", ".jpeg", ".png", ".webp"}
     MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB
 
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Formato de archivo no soportado. Solo .pdf, .docx y .txt permitidos.")
+        raise HTTPException(
+            status_code=400,
+            detail="Formato no soportado. Formatos permitidos: .pdf, .docx, .txt, .jpg, .jpeg, .png, .webp"
+        )
 
     file.file.seek(0, 2)
     size = file.file.tell()
@@ -882,7 +976,8 @@ async def upload_document(
         file_size_bytes=os.path.getsize(file_path), 
         status="Pendiente",
         folder_id=folder_id,
-        vacancy_id=vacancy_id
+        vacancy_id=vacancy_id,
+        uploaded_by=current_user.email
     )
     db.add(doc)
     db.commit()
@@ -1102,45 +1197,134 @@ def download_document(doc_id: int, db: Session = Depends(get_db), current_user: 
 class RagQueryRequest(BaseModel):
     query: str
     document_ids: Optional[list[int]] = []
+    session_id: Optional[str] = "default-session"
 
 @app.post("/api/rag/query")
 def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Endpoint RAG migrado a LangChain + Memoria de Conversación por session_id.
+    Registra automáticamente cada consulta en workflow_audit_logs.
+    """
     try:
-        query = payload.query
-        q_emb = genai.embed_content(model=MODEL_EMB, content=query, task_type="retrieval_query", output_dimensionality=768)['embedding']
-        
-        dist_expr = DocumentChunk.embedding.cosine_distance(q_emb)
-        
-        # Aislamiento multi-tenant estricto: solo chunks de documentos de este tenant
-        base_query = db.query(DocumentChunk.chunk_text, Document.filename, dist_expr.label("dist")) \
-                    .join(Document, DocumentChunk.document_id == Document.id) \
-                    .filter(Document.tenant_id == current_user.tenant_id)
-                    
-        if payload.document_ids:
-            # Validar que los document_ids pertenezcan exclusivamente a este tenant
-            valid_ids = [r[0] for r in db.query(Document.id).filter(
-                Document.id.in_(payload.document_ids), 
-                Document.tenant_id == current_user.tenant_id
-            ).all()]
-            if valid_ids:
-                base_query = base_query.filter(Document.id.in_(valid_ids), dist_expr < 0.6)
-            else:
-                return {"answer": "Los documentos seleccionados no pertenecen a tu organización.", "sources": []}
-        else:
-            base_query = base_query.filter(dist_expr < 0.45)
-            
-        results = base_query.order_by(dist_expr).limit(4).all()
-                    
-        if not results:
-            return {"answer": "No encontré información relevante en los documentos de tu organización para responder a tu pregunta.", "sources": []}
-            
-        context = "\n".join([f"Archivo {r[1]}: {r[0]}" for r in results])
-        
-        model = genai.GenerativeModel(MODEL_TEXT)
-        prompt = f"Responde la pregunta basándote SOLO en este contexto documental. Cita los archivos de soporte. Contexto:\n{context}\nPregunta: {query}"
-        return {"answer": model.generate_content(prompt).text, "sources": list(set([r[1] for r in results]))}
+        session_id = payload.session_id or f"user_{current_user.id}"
+        trigger_src = "TelegramBot" if session_id.startswith("telegram_") else "WebRAG"
+        result = execute_rag_with_memory(
+            query=payload.query,
+            tenant_id=current_user.tenant_id,
+            session_id=session_id,
+            db=db,
+            user_email=current_user.email,
+            document_ids=payload.document_ids,
+            trigger_source=trigger_src
+        )
+        return {
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "session_id": result["session_id"]
+        }
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"RAG Error: {str(e)}")
+
+
+class ConfirmVisionSchema(BaseModel):
+    emisor_nombre: Optional[str] = None
+    emisor_nit: Optional[str] = None
+    numero_factura: Optional[str] = None
+    fecha_emision: Optional[str] = None
+    moneda: Optional[str] = "COP"
+    monto_total: Optional[float] = 0.0
+    concepto_principal: Optional[str] = None
+    items: Optional[list] = None
+
+
+@app.post("/api/documents/{doc_id}/confirm-vision")
+def confirm_vision_extraction(
+    doc_id: int,
+    payload: ConfirmVisionSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin", "user", "service"]))
+):
+    """
+    Validación Humana (Human-in-the-Loop):
+    Permite al usuario revisar, corregir y confirmar los datos extraídos de una factura
+    cuando la confianza de visión fue < 80% (o en cualquier factura).
+    Eleva confidence_score a 100%, marca como Procesado y dispara el flujo contable en código.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.tenant_id == current_user.tenant_id
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado o no pertenece a tu organización")
+
+    raw_extracted = doc.extracted_data or {}
+    if isinstance(raw_extracted, dict) and "_encrypted_data" in raw_extracted:
+        raw_extracted = decrypt_sensitive_data(raw_extracted["_encrypted_data"])
+    updated = dict(raw_extracted or {})
+
+    if payload.emisor_nombre is not None:
+        updated["emisor_nombre"] = payload.emisor_nombre
+        updated["proveedor"] = payload.emisor_nombre
+    if payload.emisor_nit is not None:
+        updated["emisor_nit"] = payload.emisor_nit
+    if payload.numero_factura is not None:
+        updated["numero_factura"] = payload.numero_factura
+    if payload.fecha_emision is not None:
+        updated["fecha_emision"] = payload.fecha_emision
+    if payload.moneda is not None:
+        updated["moneda"] = payload.moneda
+    if payload.monto_total is not None:
+        updated["monto_total"] = float(payload.monto_total)
+        updated["total"] = float(payload.monto_total)
+    if payload.concepto_principal is not None:
+        updated["concepto_principal"] = payload.concepto_principal
+    if payload.items is not None:
+        updated["items"] = payload.items
+
+    updated["confidence_score"] = 100.0
+    updated["human_verified"] = True
+    updated["verified_by"] = current_user.email
+    updated["low_confidence_reason"] = None
+
+    doc.extracted_data = {
+        "_encrypted_data": encrypt_sensitive_data(updated),
+        "total": updated.get("monto_total"),
+        "monto_total": updated.get("monto_total"),
+        "proveedor": updated.get("emisor_nombre"),
+        "emisor_nombre": updated.get("emisor_nombre"),
+        "emisor_nit": updated.get("emisor_nit"),
+        "numero_factura": updated.get("numero_factura"),
+        "fecha_emision": updated.get("fecha_emision"),
+        "moneda": updated.get("moneda", "COP"),
+        "items": updated.get("items", []),
+        "confidence_score": 100.0,
+        "human_verified": True,
+        "verified_by": current_user.email,
+        "processed_by_vision": updated.get("processed_by_vision", True),
+        "estado_contable": updated.get("estado_contable")
+    }
+    doc.status = "Procesado"
+    flag_modified(doc, "extracted_data")
+    db.commit()
+    db.refresh(doc)
+
+    # Disparar flujo contable en código con confianza 100%
+    wf_result = execute_invoice_workflow(
+        db=db,
+        document=doc,
+        user_email=current_user.email,
+        trigger_source="HumanValidation-UI"
+    )
+
+    user_role = getattr(current_user, "role", "user") or "user"
+    return {
+        "message": "Datos de factura validados y flujo contable ejecutado con éxito.",
+        "workflow_result": wf_result,
+        "document": serialize_document(doc, user_role)
+    }
+
 
