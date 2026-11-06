@@ -221,9 +221,15 @@ def execute_invoice_workflow(
         "_encrypted_data": encrypt_sensitive_data(updated_ext),
         "total": monto,
         "monto_total": monto,
+        "proveedor": proveedor,
         "emisor_nombre": proveedor,
         "emisor_nit": nit,
         "numero_factura": num_fac,
+        "fecha_emision": updated_ext.get("fecha_emision"),
+        "moneda": updated_ext.get("moneda", "COP"),
+        "items": updated_ext.get("items", []),
+        "confidence_score": confidence,
+        "processed_by_vision": updated_ext.get("processed_by_vision", False),
         "estado_contable": final_state["decision"]
     }
 
@@ -249,6 +255,15 @@ def execute_invoice_workflow(
     )
     db.add(audit_entry)
     db.commit()
+
+    # 3. Si el monto supera $1.000.000 COP, enviar correo interactivo de aprobación gerencial directamente desde Python
+    if final_state["decision"] == "PENDIENTE_APROBACION_GERENCIA":
+        try:
+            from app.email_service import send_invoice_approval_email
+            email_res = send_invoice_approval_email(db=db, document=document, extracted=updated_ext)
+            final_state["email_notification"] = email_res
+        except Exception as mail_err:
+            logger.warning(f"No se pudo enviar correo de aprobación gerencial: {mail_err}")
 
     logger.info(
         f"[LangGraph OK] Factura {document.id} procesada -> Decisión: {final_state['decision']} en {duration_ms}ms"

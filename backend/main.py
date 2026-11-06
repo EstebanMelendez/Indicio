@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, Query, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -22,6 +22,7 @@ from app.vision_service import is_image_file, analyze_invoice_image
 from app.auth import get_current_user, create_access_token, verify_password, oauth2_scheme, require_role
 from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log
 from app.notifications import notify_document_status
+from app.email_service import verify_email_action_token, check_gmail_inbox_once
 import google.generativeai as genai
 import pdfplumber
 import docx
@@ -66,6 +67,17 @@ def startup_db_check():
             conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);"))
             conn.commit()
         logger.info("[SEGURIDAD] Verificación y migración de esquema completada exitosamente.")
+        # Iniciar hilo de ingesta automática de correos IMAP (cada 60s) si GMAIL_APP_PASSWORD está configurado
+        import threading
+        def _imap_worker():
+            while True:
+                time.sleep(60)
+                if os.getenv("GMAIL_APP_PASSWORD", "").strip():
+                    try:
+                        check_gmail_inbox_once(lambda: next(get_db()), process_document_background)
+                    except Exception:
+                        pass
+        threading.Thread(target=_imap_worker, daemon=True).start()
     except Exception as e:
         logger.warning("[SEGURIDAD] No se pudo verificar el esquema en startup: %s", e)
 
@@ -903,7 +915,7 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
     finally:
         db.commit()
         if doc and doc.status in ["Procesado", "Requiere Revisión", "Error"]:
-            notify_document_status(doc)
+            notify_document_status(doc, db=db)
         db.close()
 
 
@@ -1326,5 +1338,151 @@ def confirm_vision_extraction(
         "workflow_result": wf_result,
         "document": serialize_document(doc, user_role)
     }
+
+
+@app.get("/api/documents/{doc_id}/email-action", response_class=HTMLResponse)
+def handle_email_action(
+    doc_id: int,
+    action: str = Query(..., description="approve_invoice | reject_invoice | hire_candidate | reserve_candidate"),
+    token: str = Query(..., description="Firma HMAC de seguridad"),
+    db: Session = Depends(get_db)
+):
+    """
+    Endpoint interactivo invocado directamente desde los botones del correo electrónico (Gmail).
+    Reemplaza 100% en Python los nodos 'Send and Wait' de n8n para Cuentas por Pagar y Scouting RRHH.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    if not verify_email_action_token(doc_id, action, token):
+        return HTMLResponse(
+            content="<h3>❌ Enlace de autorización inválido o expirado.</h3>",
+            status_code=403
+        )
+
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        return HTMLResponse(content="<h3>❌ Documento no encontrado.</h3>", status_code=404)
+
+    action_map = {
+        "approve_invoice": {
+            "folder": "Facturas Aprobadas",
+            "status": "APROBADA_GERENCIA",
+            "title": "✅ Factura Aprobada Exitosamente",
+            "color": "#16a34a",
+            "notes": "Factura aprobada manualmente por Gerencia desde botón interactivo de correo."
+        },
+        "reject_invoice": {
+            "folder": "Facturas Rechazadas",
+            "status": "RECHAZADA_GERENCIA",
+            "title": "❌ Factura Rechazada por Gerencia",
+            "color": "#dc2626",
+            "notes": "Factura rechazada manualmente por Gerencia desde botón interactivo de correo."
+        },
+        "hire_candidate": {
+            "folder": "Candidatos Seleccionados",
+            "status": "ENTREVISTA_PROGRAMADA",
+            "title": "🌟 Candidato Preseleccionado para Entrevista",
+            "color": "#0f766e",
+            "notes": "Candidato aprobado desde Ficha de Scouting en correo."
+        },
+        "reserve_candidate": {
+            "folder": "Banco de Talentos",
+            "status": "EN_RESERVA",
+            "title": "📁 Candidato Archivado en Banco de Talentos",
+            "color": "#475569",
+            "notes": "Candidato enviado a Banco de Talentos desde Ficha de Scouting en correo."
+        }
+    }
+
+    if action not in action_map:
+        return HTMLResponse(content="<h3>❌ Acción no reconocida.</h3>", status_code=400)
+
+    cfg = action_map[action]
+    folder = db.query(Folder).filter(Folder.name == cfg["folder"], Folder.tenant_id == doc.tenant_id).first()
+    if not folder:
+        folder = Folder(name=cfg["folder"], tenant_id=doc.tenant_id)
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
+
+    doc.folder_id = folder.id
+
+    raw_ext = doc.extracted_data or {}
+    if isinstance(raw_ext, dict) and "_encrypted_data" in raw_ext:
+        dec = decrypt_sensitive_data(raw_ext["_encrypted_data"])
+        if isinstance(dec, dict):
+            raw_ext = dec
+    updated = dict(raw_ext or {})
+    updated["estado_contable"] = cfg["status"]
+    updated["notas_auditoria"] = cfg["notes"]
+
+    doc.extracted_data = {
+        "_encrypted_data": encrypt_sensitive_data(updated),
+        "match_score": updated.get("match_score"),
+        "postulante": updated.get("postulante"),
+        "rol": updated.get("rol"),
+        "anos_experiencia": updated.get("anos_experiencia"),
+        "total": updated.get("monto_total") or updated.get("total"),
+        "monto_total": updated.get("monto_total") or updated.get("total"),
+        "proveedor": updated.get("emisor_nombre") or updated.get("proveedor"),
+        "emisor_nombre": updated.get("emisor_nombre") or updated.get("proveedor"),
+        "emisor_nit": updated.get("emisor_nit"),
+        "numero_factura": updated.get("numero_factura"),
+        "fecha_emision": updated.get("fecha_emision"),
+        "moneda": updated.get("moneda", "COP"),
+        "items": updated.get("items", []),
+        "confidence_score": updated.get("confidence_score", 100.0),
+        "processed_by_vision": updated.get("processed_by_vision", False),
+        "estado_contable": cfg["status"]
+    }
+    flag_modified(doc, "extracted_data")
+
+    db.add(WorkflowAuditLog(
+        tenant_id=doc.tenant_id,
+        document_id=doc.id,
+        workflow_name="DecisionGerencial-CorreoInteractivo",
+        trigger_source="Gmail-ButtonClick",
+        user_email=os.getenv("GMAIL_NOTIFY_TO", "gerencia@indicio.internal"),
+        ai_provider="FastAPI-HMAC-Workflow",
+        input_summary=f"Clic en botón de correo '{action}' sobre {doc.filename}",
+        output_result={
+            "decision": cfg["status"],
+            "target_folder": cfg["folder"],
+            "notes": cfg["notes"]
+        },
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=45
+    ))
+    db.commit()
+
+    html_page = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <title>{cfg['title']} - Indicio Enterprise</title>
+    </head>
+    <body style="font-family:'Segoe UI',Arial,sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+        <div style="background:#ffffff;max-width:480px;padding:36px;border-radius:20px;box-shadow:0 10px 25px rgba(0,0,0,0.08);text-align:center;border-top:6px solid {cfg['color']};">
+            <h2 style="color:{cfg['color']};margin-top:0;">{cfg['title']}</h2>
+            <p style="color:#334155;font-size:15px;line-height:1.6;">
+                El documento <strong>{doc.filename}</strong> ha sido movido automáticamente a la carpeta
+                <strong>"{cfg['folder']}"</strong> con estado <strong>{cfg['status']}</strong>.
+            </p>
+            <p style="color:#64748b;font-size:13px;">La decisión quedó registrada en el Historial de Auditoría de Indicio Enterprise.</p>
+            <a href="http://localhost:5173" style="display:inline-block;margin-top:16px;background:#1e293b;color:#ffffff;text-decoration:none;padding:10px 22px;border-radius:10px;font-size:13px;font-weight:600;">Ir al Panel de Indicio Enterprise</a>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_page)
+
+
+@app.post("/api/email/sync-inbox")
+def sync_gmail_inbox_endpoint(current_user: User = Depends(require_role(["admin", "service"]))):
+    """Permite disparar manualmente la revisión de correos entrantes con adjuntos por IMAP."""
+    return check_gmail_inbox_once(lambda: next(get_db()), process_document_background)
+
 
 

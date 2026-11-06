@@ -32,11 +32,14 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    > npm run dev
    (El frontend estará disponible en http://localhost:5173).
 
-5. AUTOMATIZACIONES Y CORREOS (n8n)
+5. AUTOMATIZACIONES Y CORREOS (100% EN PYTHON - SIN ABRIR N8N EN CHROME)
    ---------------------------------
-   Entra a http://localhost:5678 en tu navegador.
-   Asegúrate de que los Workflows de "Ingesta" y "Notificaciones" estén activados (en ON).
-   Esto permitirá que el sistema reciba correos automáticamente y responda al terminar.
+   Ya NO es necesario entrar a http://localhost:5678 para activar flujos ni reconectar Google OAuth2.
+   Todos los flujos (Cuentas por Pagar con LangGraph, Chatbot RAG con LangChain, Scouting RRHH e Ingesta/Aprobación por Correo)
+   viven directamente en el backend de Python.
+   Para que salgan y entren los correos de Gmail automáticamente, asegúrate de poner tu Contraseña de Aplicación de Google (16 letras)
+   en el archivo 'backend/.env' en la línea:
+   GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 
 6. ACCESO AL SISTEMA POR ROLES
    ---------------------------------

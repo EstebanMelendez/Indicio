@@ -29,11 +29,12 @@ export default function Dashboard({ stats }) {
     fetchAuditLogs();
   }, [workflowFilter]);
 
-  const totalDocs = stats.total || 0;
-  const processedDocs = stats.processed || 0;
-  const needsReviewDocs = stats.needs_review || 0;
-  const visionDocs = stats.vision_count || 0;
-  const errorDocs = stats.errors || 0;
+  const safeStats = stats || {};
+  const totalDocs = safeStats.total || 0;
+  const processedDocs = safeStats.processed || 0;
+  const needsReviewDocs = safeStats.needs_review || 0;
+  const visionDocs = safeStats.vision_count || 0;
+  const errorDocs = safeStats.errors || 0;
   const successRate = totalDocs > 0 ? Math.round(((processedDocs + needsReviewDocs) / totalDocs) * 100) : 100;
 
   const validTimes = auditLogs.map(l => l.execution_time_ms).filter(t => t && t > 0);
@@ -50,6 +51,9 @@ export default function Dashboard({ stats }) {
     }
     if (source.includes('Human')) {
       return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">👤 HumanLoop</span>;
+    }
+    if (source.includes('Gmail') || source.includes('SMTP')) {
+      return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">📧 GmailPython</span>;
     }
     if (source.includes('WebRAG')) {
       return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">💬 WebRAG</span>;
@@ -147,7 +151,7 @@ export default function Dashboard({ stats }) {
           <span className="text-xs text-slate-400 font-medium">Clasificación automática con Gemini Flash</span>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {Object.entries(stats.categories || {}).map(([cat, count]) => {
+          {Object.entries(safeStats.categories || {}).map(([cat, count]) => {
             const pct = totalDocs > 0 ? Math.round((count / totalDocs) * 100) : 0;
             return (
               <div key={cat} className="p-4 border border-slate-200/80 rounded-xl bg-slate-50/60 hover:bg-white hover:shadow-xs transition-all">
@@ -193,8 +197,12 @@ export default function Dashboard({ stats }) {
             >
               <option value="">Todos los Flujos ({auditLogs.length})</option>
               <option value="CuentasPorPagar-LangGraph">⚙️ Cuentas por Pagar (LangGraph)</option>
-              <option value="GeminiVision-InvoiceOCR">📸 Visión Computacional (Facturas)</option>
+              <option value="VisionPorComputador-Facturas">📸 Visión Computacional (Facturas)</option>
               <option value="ChatbotRAG-LangChain">🧠 Chatbot RAG con Memoria (LangChain)</option>
+              <option value="NotificacionCorreo-AprobacionFactura">📧 Correo Aprobación Facturas (SMTP)</option>
+              <option value="DecisionGerencial-CorreoInteractivo">✅ Decisión Gerencial desde Correo</option>
+              <option value="HeadhunterRRHH-Python">🌟 Headhunter & Scouting RRHH</option>
+              <option value="IngestaCorreo-IMAP">📥 Ingesta de Correo (IMAP)</option>
             </select>
             <button
               onClick={() => fetchAuditLogs()}
@@ -230,11 +238,23 @@ export default function Dashboard({ stats }) {
                 </tr>
               ) : (
                 auditLogs.map((log) => {
-                  const decision =
-                    log.output_result?.decision ||
-                    log.output_result?.numero_factura ||
-                    log.output_result?.answer_preview ||
-                    JSON.stringify(log.output_result);
+                  const out = log.output_result || {};
+                  let decision =
+                    out.decision ||
+                    out.answer_preview ||
+                    (out.sent ? `Correo enviado a ${out.recipient}` : null) ||
+                    (out.requires_review === true ? 'REQUIERE_REVISION_HUMANA' : null) ||
+                    (out.proveedor ? `${out.proveedor} ($${Number(out.monto_total || 0).toLocaleString('es-CO')})` : null) ||
+                    out.numero_factura ||
+                    JSON.stringify(out);
+
+                  const badgeStyle =
+                    log.status === 'SUCCESS'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : log.status === 'REQUIRES_REVIEW' || decision.includes('REVISION')
+                      ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                      : 'bg-rose-50 text-rose-700 border border-rose-200';
+
                   return (
                     <tr
                       key={log.id}
@@ -261,11 +281,7 @@ export default function Dashboard({ stats }) {
                         {log.input_summary}
                       </td>
                       <td className="p-3 text-xs max-w-[220px] truncate" title={decision}>
-                        <span className={`px-2 py-0.5 rounded-md font-semibold ${
-                          log.status === 'SUCCESS'
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : 'bg-rose-50 text-rose-700 border border-rose-200'
-                        }`}>
+                        <span className={`px-2 py-0.5 rounded-md font-semibold ${badgeStyle}`}>
                           {decision}
                         </span>
                       </td>
