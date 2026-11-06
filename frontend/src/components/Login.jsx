@@ -12,8 +12,8 @@ export default function Login({ onLoginSuccess }) {
     setLoginError('');
     try {
       const res = await authAPI.login({
-        email: loginUser,
-        password: loginPass
+        email: loginUser.trim().toLowerCase(),
+        password: loginPass.trim()
       });
       if (res.data.role) {
         sessionStorage.setItem('role', res.data.role);
