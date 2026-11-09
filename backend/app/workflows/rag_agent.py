@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlalchemy.orm import Session
 from app.models import Document, DocumentChunk, Folder, Vacancy, WorkflowAuditLog
 from app.crypto import decrypt_sensitive_data
+from app.fallback_service import call_groq_text
 import google.generativeai as genai
 
 logger = logging.getLogger("ChatbotRAG")
@@ -204,8 +205,17 @@ PREGUNTA ACTUAL DEL USUARIO:
             continue
 
     if not success:
-        status_log = "ERROR"
-        answer = "⚠️ En este momento no pude consultar el modelo de inteligencia artificial. Por favor intenta de nuevo en unos instantes."
+        logger.warning("[RAG PLAN B] Todos los modelos de Gemini fallaron. Activando Plan B en Groq Cloud API...")
+        groq_ans, groq_prov = call_groq_text(system_prompt, json_mode=False)
+        if groq_ans:
+            answer = groq_ans
+            provider_used = groq_prov or "llama-3.3-70b-versatile (PlanB-Groq)"
+            status_log = "SUCCESS"
+            error_msg = None
+            success = True
+        else:
+            status_log = "ERROR"
+            answer = "⚠️ En este momento no pude consultar el modelo de inteligencia artificial. Por favor intenta de nuevo en unos instantes."
 
     # 4. Filtrado inteligente de fuentes citadas:
     # Mostrar en 'sources' únicamente los documentos que realmente se mencionan en la respuesta

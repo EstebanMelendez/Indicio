@@ -6,6 +6,7 @@ import smtplib
 import imaplib
 import email
 from email.header import decode_header
+from email.utils import make_msgid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import time
@@ -36,10 +37,15 @@ def verify_email_action_token(doc_id: int, action: str, token: str) -> bool:
     return hmac.compare_digest(expected, token or "")
 
 
-def send_html_email(subject: str, html_body: str, to_email: Optional[str] = None) -> Dict[str, Any]:
+def send_html_email(
+    subject: str,
+    html_body: str,
+    to_email: Optional[str] = None,
+    gmail_label: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Envía un correo HTML usando SMTP de Gmail con Contraseña de Aplicación (GMAIL_APP_PASSWORD).
-    No caduca como OAuth2 ni requiere abrir n8n en Chrome.
+    Envía un correo HTML usando SMTP de Gmail con Contraseña de Aplicación (GMAIL_APP_PASSWORD)
+    y aplica automáticamente la etiqueta de Gmail (ej. 'APROBACIONES PENDIENTES' o 'HOJAS DE VIDA / RRHH') por IMAP.
     """
     gmail_user = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
@@ -53,6 +59,8 @@ def send_html_email(subject: str, html_body: str, to_email: Optional[str] = None
 
     try:
         msg = MIMEMultipart("alternative")
+        msg_id_hdr = make_msgid(domain="indicio.enterprise")
+        msg["Message-ID"] = msg_id_hdr
         msg["Subject"] = subject
         msg["From"] = f"Indicio Enterprise <{gmail_user}>"
         msg["To"] = recipient
@@ -62,8 +70,27 @@ def send_html_email(subject: str, html_body: str, to_email: Optional[str] = None
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, [recipient], msg.as_string())
 
-        logger.info(f"[EMAIL OK] Correo enviado a {recipient}: {subject}")
-        return {"sent": True, "recipient": recipient}
+        # Si se indicó una etiqueta de Gmail, aplicarla automáticamente por IMAP
+        if gmail_label:
+            try:
+                time.sleep(1.2)
+                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+                mail.login(gmail_user, gmail_pass)
+                mail.select("INBOX")
+                typ, data = mail.search(None, f'(HEADER Message-ID "{msg_id_hdr}")')
+                target_ids = data[0].split() if (typ == "OK" and data and data[0]) else []
+                if not target_ids:
+                    typ_all, data_all = mail.search(None, "ALL")
+                    if typ_all == "OK" and data_all and data_all[0]:
+                        target_ids = [data_all[0].split()[-1]]
+                for mid in target_ids:
+                    mail.copy(mid, f'"{gmail_label}"')
+                mail.logout()
+            except Exception as lbl_err:
+                logger.warning(f"[EMAIL LABEL WARN] No se pudo asignar etiqueta '{gmail_label}': {lbl_err}")
+
+        logger.info(f"[EMAIL OK] Correo enviado a {recipient} (Etiqueta: {gmail_label}): {subject}")
+        return {"sent": True, "recipient": recipient, "label": gmail_label}
     except Exception as e:
         logger.warning(f"[EMAIL ERROR] No se pudo enviar correo '{subject}': {e}")
         return {"sent": False, "reason": str(e)}
@@ -152,7 +179,7 @@ def send_invoice_approval_email(db: Session, document: Document, extracted: Dict
     </div>
     """
 
-    res = send_html_email(subject, html_body)
+    res = send_html_email(subject, html_body, gmail_label="APROBACIONES PENDIENTES")
     duration_ms = int((time.time() - start_time) * 1000)
 
     try:
@@ -233,7 +260,7 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
     hire_url = f"{base_url}/api/documents/{document.id}/email-action?action=hire_candidate&token={hire_token}"
     pool_url = f"{base_url}/api/documents/{document.id}/email-action?action=reserve_candidate&token={pool_token}"
 
-    subject = f"🌟 [Scouting RRHH {score}%] Candidato Destacado: {postulante} ({vac_title})"
+    subject = f"[Scouting Top {score}%] {postulante} - {rol} - Candidato Destacado 🎯 Ficha de Scouting ({vac_title})"
     html_body = f"""
     <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;">
         <div style="background:linear-gradient(135deg,#0f766e,#14b8a6);padding:24px;color:#ffffff;">
@@ -256,7 +283,7 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
         </div>
     </div>
     """
-    res = send_html_email(subject, html_body)
+    res = send_html_email(subject, html_body, gmail_label="HOJAS DE VIDA / RRHH")
     duration_ms = int((time.time() - start_time) * 1000)
 
     db.add(WorkflowAuditLog(
@@ -296,9 +323,17 @@ def send_general_status_email(document: Document, extracted: Dict[str, Any]) -> 
     return send_html_email(subject, html_body)
 
 
-def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_callback: Callable[[int, str, str], None]) -> Dict[str, Any]:
+# Conjunto en memoria de adjuntos de correo ya descargados en esta sesión (Message-ID + nombre)
+PROCESSED_EMAIL_ATTACHMENTS = set()
+
+
+def check_gmail_inbox_once(
+    db_session_factory: Callable[[], Session],
+    process_callback: Callable[[int, str, str], None],
+    include_recent_read: bool = False
+) -> Dict[str, Any]:
     """
-    Revisa por IMAP (imap.gmail.com) si hay correos NO LEÍDOS con archivos adjuntos,
+    Revisa por IMAP (imap.gmail.com) si hay correos con archivos adjuntos,
     los descarga a storage/tenant_1/, los registra en la carpeta 'Bandeja Correo' y dispara su procesamiento con IA.
     Reemplaza 100% en Python el flujo 'Indicio - Ingesta' de n8n.
     """
@@ -306,7 +341,7 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
 
     if not gmail_user or not gmail_pass:
-        return {"checked": False, "reason": "Falta configurar GMAIL_APP_PASSWORD en backend/.env"}
+        return {"checked": False, "downloaded": 0, "files": [], "reason": "Falta configurar GMAIL_APP_PASSWORD en backend/.env"}
 
     downloaded_files = []
     try:
@@ -314,13 +349,20 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
         mail.login(gmail_user, gmail_pass)
         mail.select("INBOX")
 
-        # Buscar correos no leídos
+        # 1. Buscar primero correos NO LEÍDOS
         status, messages = mail.search(None, '(UNSEEN)')
-        if status != "OK" or not messages or not messages[0]:
+        msg_ids = messages[0].split()[-8:] if (status == "OK" and messages and messages[0]) else []
+
+        # 2. Si se invocó desde el botón manual "Sincronizar Gmail" y no había UNSEEN (por si el usuario abrió el correo antes),
+        # revisar los últimos 5 correos recibidos en la bandeja evitando duplicados.
+        if include_recent_read and not msg_ids:
+            status_all, messages_all = mail.search(None, 'ALL')
+            if status_all == "OK" and messages_all and messages_all[0]:
+                msg_ids = messages_all[0].split()[-5:]
+
+        if not msg_ids:
             mail.logout()
             return {"checked": True, "downloaded": 0, "files": []}
-
-        msg_ids = messages[0].split()[-10:]  # Máximo 10 correos recientes por ciclo
 
         for m_id in msg_ids:
             res, msg_data = mail.fetch(m_id, "(RFC822)")
@@ -331,6 +373,12 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
                     continue
                 msg = email.message_from_bytes(response_part[1])
                 sender = msg.get("From", "correo@externo.com")
+                subject_hdr = msg.get("Subject", "")
+                msg_uid = msg.get("Message-ID") or str(m_id)
+
+                # Ignorar correos autogenerados por el propio sistema Indicio (notificaciones salientes)
+                if "Indicio Enterprise" in sender or "Aprobación Gerencial" in subject_hdr or "Documento procesado en Indicio" in subject_hdr:
+                    continue
 
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
@@ -350,24 +398,39 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
                         else:
                             filename += str(part_str)
 
-                    ext = os.path.splitext(filename)[1].lower()
+                    clean_base = os.path.basename(filename).strip()
+                    ext = os.path.splitext(clean_base)[1].lower()
                     if ext not in ALLOWED_ATTACHMENT_EXTS:
                         continue
 
-                    safe_name = f"email_{int(time.time())}_{os.path.basename(filename)}"
-                    tenant_dir = "storage/tenant_1"
-                    os.makedirs(tenant_dir, exist_ok=True)
-                    file_path = os.path.join(tenant_dir, safe_name)
+                    dedup_key = f"{msg_uid}::{clean_base}"
+                    if dedup_key in PROCESSED_EMAIL_ATTACHMENTS:
+                        continue
 
                     payload_bytes = part.get_payload(decode=True)
                     if not payload_bytes:
                         continue
 
-                    with open(file_path, "wb") as f:
-                        f.write(payload_bytes)
-
                     db = db_session_factory()
                     try:
+                        # Verificar también en BD que no se haya importado ya ese mismo adjunto por tamaño y sufijo
+                        existing = db.query(Document).filter(
+                            Document.tenant_id == 1,
+                            Document.filename.ilike(f"%_{clean_base}"),
+                            Document.file_size_bytes == len(payload_bytes)
+                        ).first()
+                        if existing:
+                            PROCESSED_EMAIL_ATTACHMENTS.add(dedup_key)
+                            continue
+
+                        safe_name = f"email_{int(time.time())}_{clean_base}"
+                        tenant_dir = "storage/tenant_1"
+                        os.makedirs(tenant_dir, exist_ok=True)
+                        file_path = os.path.join(tenant_dir, safe_name)
+
+                        with open(file_path, "wb") as f:
+                            f.write(payload_bytes)
+
                         folder = db.query(Folder).filter(Folder.name == "Bandeja Correo", Folder.tenant_id == 1).first()
                         if not folder:
                             folder = Folder(name="Bandeja Correo", tenant_id=1)
@@ -397,13 +460,14 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
                             user_email=gmail_user,
                             ai_provider="Python-IMAP-Worker",
                             input_summary=f"Adjunto recibido de {sender[:45]}: {safe_name}",
-                            output_result={"folder": "Bandeja Correo", "document_id": new_doc.id},
+                            output_result={"folder": "Bandeja Correo", "document_id": new_doc.id, "decision": "DESCARGADO_A_BANDEJA_CORREO"},
                             confidence_score=100,
                             status="SUCCESS",
                             execution_time_ms=120
                         ))
                         db.commit()
                         doc_id = new_doc.id
+                        PROCESSED_EMAIL_ATTACHMENTS.add(dedup_key)
                     finally:
                         db.close()
 
@@ -419,5 +483,5 @@ def check_gmail_inbox_once(db_session_factory: Callable[[], Session], process_ca
         return {"checked": True, "downloaded": len(downloaded_files), "files": downloaded_files}
     except Exception as e:
         logger.warning(f"[IMAP WARN] Error revisando bandeja de Gmail: {e}")
-        return {"checked": False, "reason": str(e)}
+        return {"checked": False, "downloaded": 0, "files": [], "reason": str(e)}
 

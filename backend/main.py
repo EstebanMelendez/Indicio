@@ -23,6 +23,7 @@ from app.auth import get_current_user, create_access_token, verify_password, oau
 from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log
 from app.notifications import notify_document_status
 from app.email_service import verify_email_action_token, check_gmail_inbox_once
+from app.fallback_service import call_groq_text
 import google.generativeai as genai
 import pdfplumber
 import docx
@@ -711,9 +712,14 @@ def process_document_background(doc_id: int, file_path: str, filename: str):
                         continue
 
             if not response:
-                raise last_error or ValueError("No se pudo obtener respuesta de la IA.")
-                
-            raw_response = response.text.strip()
+                print(f"[PLAN B] Modelos de Gemini agotados para {filename}. Activando Plan B en Groq API...")
+                groq_raw, _ = call_groq_text(prompt, json_mode=True)
+                if groq_raw:
+                    raw_response = groq_raw.strip()
+                else:
+                    raise last_error or ValueError("No se pudo obtener respuesta de la IA.")
+            else:
+                raw_response = response.text.strip()
             
             # Limpieza por si Gemini insiste en enviar Markdown
             if raw_response.startswith("```json"):
@@ -1241,6 +1247,7 @@ def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_u
 
 
 class ConfirmVisionSchema(BaseModel):
+    action: Optional[str] = "confirm"  # "confirm" | "reject"
     emisor_nombre: Optional[str] = None
     emisor_nit: Optional[str] = None
     numero_factura: Optional[str] = None
@@ -1260,9 +1267,8 @@ def confirm_vision_extraction(
 ):
     """
     Validación Humana (Human-in-the-Loop):
-    Permite al usuario revisar, corregir y confirmar los datos extraídos de una factura
+    Permite al usuario revisar, corregir y confirmar (o rechazar por ilegible) los datos de una factura
     cuando la confianza de visión fue < 80% (o en cualquier factura).
-    Eleva confidence_score a 100%, marca como Procesado y dispara el flujo contable en código.
     """
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -1277,6 +1283,70 @@ def confirm_vision_extraction(
     if isinstance(raw_extracted, dict) and "_encrypted_data" in raw_extracted:
         raw_extracted = decrypt_sensitive_data(raw_extracted["_encrypted_data"])
     updated = dict(raw_extracted or {})
+
+    # Si el usuario humano decide RECHAZAR la factura por ser ilegible o inválida
+    if payload.action == "reject":
+        folder = db.query(Folder).filter(
+            Folder.name == "Facturas Rechazadas",
+            Folder.tenant_id == current_user.tenant_id
+        ).first()
+        if not folder:
+            folder = Folder(name="Facturas Rechazadas", tenant_id=current_user.tenant_id)
+            db.add(folder)
+            db.commit()
+            db.refresh(folder)
+
+        doc.folder_id = folder.id
+        doc.status = "Procesado"
+        updated["estado_contable"] = "RECHAZADA_REVISION_HUMANA"
+        updated["notas_auditoria"] = f"Factura rechazada manualmente en Revisión Humana por {current_user.email} (Imagen ilegible o inválida)."
+        updated["human_verified"] = True
+        updated["verified_by"] = current_user.email
+
+        doc.extracted_data = {
+            "_encrypted_data": encrypt_sensitive_data(updated),
+            "total": updated.get("monto_total") or 0.0,
+            "monto_total": updated.get("monto_total") or 0.0,
+            "proveedor": updated.get("emisor_nombre") or "Rechazada por Ilegible",
+            "emisor_nombre": updated.get("emisor_nombre") or "Rechazada por Ilegible",
+            "emisor_nit": updated.get("emisor_nit"),
+            "numero_factura": updated.get("numero_factura"),
+            "confidence_score": updated.get("confidence_score", 10.0),
+            "human_verified": True,
+            "verified_by": current_user.email,
+            "processed_by_vision": True,
+            "estado_contable": "RECHAZADA_REVISION_HUMANA"
+        }
+        flag_modified(doc, "extracted_data")
+
+        wf_result = {
+            "decision": "RECHAZADA_REVISION_HUMANA",
+            "payment_status": "RECHAZADA_REVISION_HUMANA",
+            "target_folder": "Facturas Rechazadas",
+            "notes": updated["notas_auditoria"]
+        }
+
+        db.add(WorkflowAuditLog(
+            tenant_id=doc.tenant_id,
+            document_id=doc.id,
+            workflow_name="CuentasPorPagar-LangGraph",
+            trigger_source="HumanValidation-UI",
+            user_email=current_user.email,
+            ai_provider="Human-in-the-Loop",
+            input_summary=f"Rechazo manual de factura ilegible: {doc.filename}",
+            output_result=wf_result,
+            confidence_score=int(float(updated.get("confidence_score") or 10)),
+            status="SUCCESS",
+            execution_time_ms=35
+        ))
+        db.commit()
+        db.refresh(doc)
+        user_role = getattr(current_user, "role", "user") or "user"
+        return {
+            "message": "Factura rechazada y movida a Facturas Rechazadas.",
+            "workflow_result": wf_result,
+            "document": serialize_document(doc, user_role)
+        }
 
     if payload.emisor_nombre is not None:
         updated["emisor_nombre"] = payload.emisor_nombre
@@ -1480,9 +1550,9 @@ def handle_email_action(
 
 
 @app.post("/api/email/sync-inbox")
-def sync_gmail_inbox_endpoint(current_user: User = Depends(require_role(["admin", "service"]))):
+def sync_gmail_inbox_endpoint(current_user: User = Depends(require_role(["admin", "user", "service"]))):
     """Permite disparar manualmente la revisión de correos entrantes con adjuntos por IMAP."""
-    return check_gmail_inbox_once(lambda: next(get_db()), process_document_background)
+    return check_gmail_inbox_once(lambda: next(get_db()), process_document_background, include_recent_read=True)
 
 
 

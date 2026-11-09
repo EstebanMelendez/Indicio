@@ -63,4 +63,12 @@ Sigue estos pasos en orden para levantar todo el proyecto correctamente:
    > python telegram_bot_service.py
    (El bot responderá a tus preguntas en tiempo real citando las fuentes).
 
+8. EJECUTAR LAS 7 PRUEBAS AUTOMÁTICAS (PYTEST - TERCER CORTE)
+   ---------------------------------
+   Abre una terminal en la carpeta 'backend', activa el entorno virtual y ejecuta:
+   > cd backend
+   > venv\Scripts\activate
+   > pytest test_tercer_corte.py -v
+   (Verás en color verde '7 passed' comprobando LangGraph, Visión, LangChain, Cifrado Ley 1581 y Plan B).
+
 ===================================================

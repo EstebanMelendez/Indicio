@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react';
 import {
   UploadCloud, FileText, Trash2, Eye, Folder, FolderPlus, Search,
-  AlertCircle, Camera, Image as ImageIcon, ArrowLeft, Receipt, Briefcase
+  AlertCircle, Camera, Image as ImageIcon, ArrowLeft, Receipt, Briefcase, Mail, RefreshCw
 } from 'lucide-react';
-import { documentAPI, folderAPI } from '../services/api';
+import { documentAPI, folderAPI, emailAPI } from '../services/api';
 import DocumentViewer from './DocumentViewer';
 
 export default function Repository({ folders, documents, fetchData }) {
   const [currentFolder, setCurrentFolder] = useState(null);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [syncingGmail, setSyncingGmail] = useState(false);
+  const [gmailBanner, setGmailBanner] = useState(null);
   const [dragActive, setDragActive] = useState(false);
 
   // Filtros pasados al backend
@@ -91,6 +93,40 @@ export default function Repository({ folders, documents, fetchData }) {
     }
   };
 
+  const handleSyncGmail = async () => {
+    setSyncingGmail(true);
+    setGmailBanner(null);
+    try {
+      const res = await emailAPI.syncInbox();
+      const data = res.data || {};
+      if (!data.checked) {
+        setGmailBanner({
+          type: 'error',
+          text: `⚠️ No se pudo conectar a Gmail: ${data.reason || 'Verifica GMAIL_APP_PASSWORD en backend/.env'}`
+        });
+      } else if (data.downloaded > 0) {
+        setGmailBanner({
+          type: 'success',
+          text: `✅ Se descargaron ${data.downloaded} adjunto(s) desde Gmail (${data.files.join(', ')}) en la carpeta "Bandeja Correo". Procesando con IA...`
+        });
+        fetchData();
+        setTimeout(() => fetchData(), 3500);
+      } else {
+        setGmailBanner({
+          type: 'info',
+          text: '📬 Bandeja de Gmail sincronizada en vivo: no se encontraron correos nuevos con adjuntos pendientes.'
+        });
+      }
+    } catch (error) {
+      setGmailBanner({
+        type: 'error',
+        text: error.response?.data?.detail || 'Error al sincronizar bandeja de Gmail.'
+      });
+    } finally {
+      setSyncingGmail(false);
+    }
+  };
+
   const handleDeleteFolder = async (id) => {
     if (!window.confirm('¿Eliminar esta carpeta?')) return;
     try {
@@ -139,9 +175,9 @@ export default function Repository({ folders, documents, fetchData }) {
   const getFolderDocCount = (folderId) => documents.filter(d => d.folder_id === folderId).length;
 
   const getFolderStyle = (name = '') => {
-    if (name.includes('Aprobadas')) return 'border-emerald-200 bg-emerald-50/40 text-emerald-700';
-    if (name.includes('Duplicadas')) return 'border-rose-200 bg-rose-50/40 text-rose-700';
-    if (name.includes('Revisión')) return 'border-amber-200 bg-amber-50/40 text-amber-700';
+    if (name.includes('Aprobadas') || name.includes('Seleccionados')) return 'border-emerald-200 bg-emerald-50/40 text-emerald-700';
+    if (name.includes('Duplicadas') || name.includes('Rechazadas')) return 'border-rose-200 bg-rose-50/40 text-rose-700';
+    if (name.includes('Revisión') || name.includes('Pendientes')) return 'border-amber-200 bg-amber-50/40 text-amber-700';
     return 'border-slate-200 bg-white text-blue-600';
   };
 
@@ -174,7 +210,7 @@ export default function Repository({ folders, documents, fetchData }) {
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
                 estadoContable.includes('APROBADA')
                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : estadoContable.includes('DUPLICADA')
+                  : estadoContable.includes('DUPLICADA') || estadoContable.includes('RECHAZADA')
                   ? 'bg-rose-50 text-rose-700 border-rose-200'
                   : 'bg-amber-50 text-amber-700 border-amber-200'
               }`}>
@@ -258,6 +294,19 @@ export default function Repository({ folders, documents, fetchData }) {
         </div>
 
         <div className="flex flex-wrap gap-2">
+          <button
+            onClick={handleSyncGmail}
+            disabled={syncingGmail}
+            className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl hover:bg-emerald-700 disabled:opacity-60 flex items-center shadow-sm transition-colors font-semibold text-sm cursor-pointer"
+            title="Buscar ahora mismo correos con facturas o CVs adjuntos en Gmail (IMAP)"
+          >
+            {syncingGmail ? (
+              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <Mail className="w-4 h-4 mr-2" />
+            )}
+            {syncingGmail ? 'Sincronizando Gmail...' : '📥 Sincronizar Gmail'}
+          </button>
           {!currentFolder && (
             <button
               onClick={handleCreateFolder}
@@ -294,6 +343,27 @@ export default function Repository({ folders, documents, fetchData }) {
           </label>
         </div>
       </div>
+
+      {/* BANNER RESULTADO SINCRONIZACIÓN GMAIL */}
+      {gmailBanner && (
+        <div
+          className={`p-4 rounded-2xl border flex items-center justify-between text-sm font-medium ${
+            gmailBanner.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : gmailBanner.type === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-800'
+              : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <span>{gmailBanner.text}</span>
+          <button
+            onClick={() => setGmailBanner(null)}
+            className="text-xs font-bold underline ml-4 cursor-pointer"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
 
       {/* BANNER DRAG & DROP ACTIVO */}
       {dragActive && (

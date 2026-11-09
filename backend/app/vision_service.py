@@ -8,6 +8,7 @@ from PIL import Image
 import google.generativeai as genai
 from sqlalchemy.orm import Session
 from app.models import WorkflowAuditLog
+from app.fallback_service import call_groq_vision, build_emergency_vision_fallback
 
 logger = logging.getLogger("IndicioVision")
 
@@ -130,7 +131,13 @@ REGLAS ESTRICTAS:
             continue
 
     if not response_text:
-        raise last_error or ValueError("No se pudo procesar la imagen con el módulo de Visión.")
+        logger.warning(f"[VISION PLAN B] Todos los modelos de Gemini fallaron para '{filename}'. Activando Plan B en Groq Vision...")
+        groq_text, groq_provider = call_groq_vision(vision_prompt, img)
+        if groq_text:
+            response_text = groq_text
+            provider_used = groq_provider or "Groq-Vision (PlanB)"
+        else:
+            response_text, provider_used = build_emergency_vision_fallback(filename, img.width, img.height)
 
     if response_text.startswith("```json"):
         response_text = response_text[7:-3].strip()

@@ -56,6 +56,10 @@ export const auditAPI = {
   getLogs: (params) => api.get('/audit/logs', { params }),
 };
 
+export const emailAPI = {
+  syncInbox: () => api.post('/email/sync-inbox'),
+};
+
 export const ragAPI = {
   query: (queryStr, docIds = [], sessionId = 'web-default') =>
     api.post('/rag/query', { query: queryStr, document_ids: docIds, session_id: sessionId }),

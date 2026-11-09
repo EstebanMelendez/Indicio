@@ -90,6 +90,7 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
     try {
       const res = await documentAPI.confirmVision(doc.id, {
         ...visionForm,
+        action: 'confirm',
         monto_total: Number(visionForm.monto_total) || 0
       });
       setWorkflowFeedback(res.data.workflow_result);
@@ -99,6 +100,30 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
       }
     } catch (err) {
       alert(err.response?.data?.detail || 'Error al confirmar los datos de la factura.');
+    } finally {
+      setSavingVision(false);
+    }
+  };
+
+  const handleRejectVision = async () => {
+    if (!window.confirm('¿Rechazar esta factura por ser ilegible o inválida? Se moverá a la carpeta "Facturas Rechazadas".')) {
+      return;
+    }
+    setSavingVision(true);
+    setWorkflowFeedback(null);
+    try {
+      const res = await documentAPI.confirmVision(doc.id, {
+        ...visionForm,
+        action: 'reject',
+        monto_total: Number(visionForm.monto_total) || 0
+      });
+      setWorkflowFeedback(res.data.workflow_result);
+      setIsEditingVision(false);
+      if (onDocUpdated && res.data.document) {
+        onDocUpdated(res.data.document);
+      }
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Error al rechazar la factura.');
     } finally {
       setSavingVision(false);
     }
@@ -198,16 +223,28 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
                 </div>
               )}
 
-              {/* Confirmación exitosa del flujo contable */}
+              {/* Confirmación o Rechazo en Revisión Humana */}
               {workflowFeedback && (
-                <div className="bg-emerald-50 border border-emerald-300 rounded-lg p-4 flex items-start gap-3">
-                  <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                  <div className="text-xs text-emerald-900 space-y-1">
-                    <p className="font-bold text-sm">✅ Validación Humana Confirmada y Flujo Contable Ejecutado</p>
-                    <p>
-                      Estado Contable: <strong>{workflowFeedback.payment_status}</strong> | Carpeta destino: <strong>{workflowFeedback.target_folder}</strong>
+                <div className={`${
+                  (workflowFeedback.decision || workflowFeedback.payment_status || '').includes('RECHAZADA')
+                    ? 'bg-rose-50 border-rose-300 text-rose-900'
+                    : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                } border rounded-lg p-4 flex items-start gap-3`}>
+                  <ShieldCheck className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    (workflowFeedback.decision || workflowFeedback.payment_status || '').includes('RECHAZADA')
+                      ? 'text-rose-600'
+                      : 'text-emerald-600'
+                  }`} />
+                  <div className="text-xs space-y-1">
+                    <p className="font-bold text-sm">
+                      {(workflowFeedback.decision || workflowFeedback.payment_status || '').includes('RECHAZADA')
+                        ? '❌ Factura Rechazada en Revisión Humana'
+                        : '✅ Validación Humana Confirmada y Flujo Contable Ejecutado'}
                     </p>
-                    <p className="text-emerald-700">{workflowFeedback.notes}</p>
+                    <p>
+                      Estado Contable: <strong>{workflowFeedback.decision || workflowFeedback.payment_status}</strong> | Carpeta destino: <strong>{workflowFeedback.target_folder}</strong>
+                    </p>
+                    <p>{workflowFeedback.notes}</p>
                   </div>
                 </div>
               )}
@@ -324,7 +361,16 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
                     </div>
                   </div>
 
-                  <div className="flex justify-end pt-2">
+                  <div className="flex flex-wrap justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={handleRejectVision}
+                      disabled={savingVision}
+                      className="bg-rose-600 hover:bg-rose-700 text-white px-4 py-2.5 rounded-lg text-xs font-bold flex items-center gap-2 shadow-sm transition-colors cursor-pointer"
+                    >
+                      <XCircle className="w-4 h-4" />
+                      ❌ Rechazar Factura (Ilegible / Inválida)
+                    </button>
                     <button
                       type="submit"
                       disabled={savingVision}

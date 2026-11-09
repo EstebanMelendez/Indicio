@@ -1,15 +1,39 @@
 import { useState, useEffect } from 'react';
 import {
   RefreshCw, ShieldCheck, Clock, Cpu, FileText, CheckCircle2,
-  AlertTriangle, Zap, Eye, X, Camera, Receipt, Briefcase, FileCheck
+  AlertTriangle, Zap, Eye, X, Camera, Receipt, Briefcase, FileCheck, Mail
 } from 'lucide-react';
-import { auditAPI } from '../services/api';
+import { auditAPI, emailAPI } from '../services/api';
 
 export default function Dashboard({ stats }) {
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
+  const [syncingGmail, setSyncingGmail] = useState(false);
+  const [syncMsg, setSyncMsg] = useState(null);
   const [workflowFilter, setWorkflowFilter] = useState('');
   const [selectedLog, setSelectedLog] = useState(null);
+
+  const handleSyncGmailDashboard = async () => {
+    setSyncingGmail(true);
+    setSyncMsg(null);
+    try {
+      const res = await emailAPI.syncInbox();
+      const d = res.data || {};
+      if (!d.checked) {
+        setSyncMsg(`⚠️ Error IMAP: ${d.reason || 'Verifica GMAIL_APP_PASSWORD'}`);
+      } else if (d.downloaded > 0) {
+        setSyncMsg(`✅ ${d.downloaded} adjunto(s) descargado(s) desde Gmail (${d.files.join(', ')})`);
+        fetchAuditLogs();
+        setTimeout(() => fetchAuditLogs(), 3000);
+      } else {
+        setSyncMsg('📬 Bandeja de Gmail al día (0 adjuntos nuevos pendientes).');
+      }
+    } catch (e) {
+      setSyncMsg('⚠️ No se pudo sincronizar Gmail en este momento.');
+    } finally {
+      setSyncingGmail(false);
+    }
+  };
 
   const fetchAuditLogs = async (filterVal = workflowFilter) => {
     setLoadingLogs(true);
@@ -205,6 +229,19 @@ export default function Dashboard({ stats }) {
               <option value="IngestaCorreo-IMAP">📥 Ingesta de Correo (IMAP)</option>
             </select>
             <button
+              onClick={handleSyncGmailDashboard}
+              disabled={syncingGmail}
+              className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-100 disabled:opacity-60 transition-colors cursor-pointer"
+              title="Revisar bandeja de entrada de Gmail por IMAP ahora mismo"
+            >
+              {syncingGmail ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Mail className="w-3.5 h-3.5" />
+              )}
+              {syncingGmail ? 'Sincronizando...' : '📥 Sincronizar Gmail'}
+            </button>
+            <button
               onClick={() => fetchAuditLogs()}
               className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-indigo-100 transition-colors cursor-pointer"
             >
@@ -213,6 +250,13 @@ export default function Dashboard({ stats }) {
             </button>
           </div>
         </div>
+
+        {syncMsg && (
+          <div className="mb-4 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700 flex items-center justify-between">
+            <span>{syncMsg}</span>
+            <button onClick={() => setSyncMsg(null)} className="text-slate-400 hover:text-slate-700 font-bold cursor-pointer">✕</button>
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
