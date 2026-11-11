@@ -64,44 +64,51 @@ def analyze_invoice_image(
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
 
-    vision_prompt = """Eres un sistema experto de Visión por Computador y Auditoría Contable para Colombia.
-Analiza esta imagen (fotografía de celular o escaneo) y responde ESTRICTAMENTE en formato JSON válido sin markdown.
+    vision_prompt = f"Nombre del archivo a analizar: '{filename}'\n" + """Eres un sistema experto de Visión por Computador, Gestión Documental Inteligente y Auditoría Contable para Colombia.
+Analiza esta imagen (fotografía tomada con celular o documento escaneado) y responde ESTRICTAMENTE en formato JSON válido sin markdown.
 
-Debes extraer todos los datos visibles, incluyendo la tabla de productos/servicios (items) y evaluar objetivamente el nivel de confianza visual (`confidence_score` de 0 a 100) según la nitidez de la foto, iluminación y legibilidad de los números.
+1. CLASIFICACIÓN OBLIGATORIA (`category`):
+Debes clasificar la imagen en UNA de las siguientes categorías oficiales del sistema:
+- "Facturas y Cuentas de Cobro" (por defecto si es una factura, cuenta de cobro o si la imagen está borrosa/manchada/ilegible)
+- "Recibos y Comprobantes de Pago"
+- "Hojas de Vida / Perfiles Laborales" (SOLO si el documento muestra claramente estudios, experiencia laboral y habilidades de un candidato)
+- "Contratos y Acuerdos Legales"
+- "Reportes y Estados Financieros"
+- "Actas de Reunión"
+- "Manuales y Procedimientos"
 
-ESQUEMA JSON OBLIGATORIO:
+2. EXTRACCIÓN ESTRUCTURADA (`extracted_data`) SEGÚN LA CATEGORÍA:
+Evalúa siempre `confidence_score` (de 0 a 100) según la nitidez de la foto, iluminación y legibilidad.
+- Si es "Facturas y Cuentas de Cobro" o "Recibos y Comprobantes de Pago", incluye:
+  "emisor_nombre", "emisor_nit", "numero_factura", "fecha_emision" (YYYY-MM-DD), "fecha_vencimiento", "moneda" ("COP"),
+  "items": [ { "descripcion": "...", "cantidad": 1, "precio_unitario": 0.0, "subtotal": 0.0 } ],
+  "monto_subtotal": 0.0, "monto_impuestos": 0.0, "monto_total": 0.0, "metodo_pago": "...", "concepto_principal": "...",
+  "confidence_score": 94.0, "low_confidence_reason": null
+- Si es "Hojas de Vida / Perfiles Laborales", incluye:
+  "postulante" (nombre completo), "rol" (cargo o especialidad), "anos_experiencia" (número),
+  "competencias" (array de strings), "formacion" (estudios), "contacto_ubicacion" (ciudad),
+  "match_score" (puntaje de perfil 0-100), "green_flags" (array de fortalezas), "resumen_scouting" (síntesis de 2 líneas),
+  "confidence_score": 94.0
+- Si es "Contratos y Acuerdos Legales", incluye:
+  "partes", "objeto", "vigencia", "valor", "emisor_nombre" (entidad contratante), "monto_total" (valor numérico si aplica), "confidence_score": 94.0
+- Si es "Reportes y Estados Financieros", "Actas de Reunión" o "Manuales y Procedimientos", incluye:
+  "titulo", "empresa", "fecha_emision", "departamento", "conclusiones", "confidence_score": 94.0
+
+ESQUEMA JSON DE RESPUESTA:
 {
-    "category": "Facturas y Cuentas de Cobro",
-    "summary": "Resumen ejecutivo de la factura o recibo indicando emisor, ítems principales y total",
+    "category": "Una de las categorías oficiales listadas arriba",
+    "summary": "Resumen ejecutivo claro de 2 líneas describiendo el documento analizado por visión",
     "ocr_text": "Transcripción completa de todo el texto legible en la imagen para indexación semántica RAG",
     "extracted_data": {
-        "emisor_nombre": "Nombre del proveedor, tienda o comercio emisor",
-        "emisor_nit": "NIT o identificación fiscal del emisor (o null si no es legible)",
-        "numero_factura": "Número o consecutivo de la factura o recibo",
-        "fecha_emision": "Fecha de emisión en formato YYYY-MM-DD (o texto original)",
-        "fecha_vencimiento": "Fecha de vencimiento YYYY-MM-DD o null",
-        "moneda": "COP",
-        "items": [
-            {
-                "descripcion": "Nombre del producto o servicio",
-                "cantidad": 1,
-                "precio_unitario": 0.0,
-                "subtotal": 0.0
-            }
-        ],
-        "monto_subtotal": 0.0,
-        "monto_impuestos": 0.0,
-        "monto_total": 0.0,
-        "metodo_pago": "Efectivo, Tarjeta, Transferencia o Crédito",
         "confidence_score": 92.0,
         "low_confidence_reason": null
     }
 }
 
 REGLAS ESTRICTAS:
-1. Todos los montos (`monto_subtotal`, `monto_impuestos`, `monto_total`, `precio_unitario`, `subtotal`) deben ser números puros sin símbolo '$' ni separadores de miles.
-2. Si la imagen está borrosa, cortada, muy oscura o no es posible leer claramente el monto total o el proveedor, asigna un `confidence_score` menor a 75 y explica la razón en `low_confidence_reason` (ej: "Foto borrosa en la zona del NIT y total").
-3. Si la imagen es nítida y los montos son claramente legibles, asigna un `confidence_score` entre 85 y 99."""
+1. Todos los montos numéricos (`monto_total`, `monto_subtotal`, `monto_impuestos`, `precio_unitario`, `subtotal`) deben ser números puros sin símbolo '$' ni separadores de miles.
+2. Si la imagen está borrosa, manchada, cortada o no es posible leer con certeza los datos clave, asigna un `confidence_score` menor a 75 y explica el motivo en `low_confidence_reason`.
+3. Si la imagen es nítida y perfectamente legible, asigna un `confidence_score` entre 86 y 99."""
 
     candidate_models = list(dict.fromkeys([
         "gemini-3.5-flash-lite",
@@ -179,19 +186,31 @@ REGLAS ESTRICTAS:
     except Exception:
         conf = 85.0
 
-    # Penalización automática si faltan campos críticos de la factura
-    missing_fields = []
-    if not extracted.get("emisor_nombre"):
-        missing_fields.append("proveedor")
-    if not extracted.get("monto_total") or float(extracted.get("monto_total", 0)) <= 0:
-        missing_fields.append("monto_total")
-    if not extracted.get("emisor_nit"):
-        missing_fields.append("NIT")
+    detected_category = parsed.get("category") or "Facturas y Cuentas de Cobro"
+    fname_lower = filename.lower()
+    if any(k in fname_lower for k in ["factura", "cobro"]) and "Factura" not in detected_category:
+        detected_category = "Facturas y Cuentas de Cobro"
+    elif any(k in fname_lower for k in ["recibo", "comprobante"]) and "Recibo" not in detected_category:
+        detected_category = "Recibos y Comprobantes de Pago"
+    elif conf < 80.0 and "Vida" in detected_category and str(extracted.get("postulante", "")).lower() in ["", "no disponible", "no detectado", "none"]:
+        detected_category = "Facturas y Cuentas de Cobro"
 
-    if "monto_total" in missing_fields or "proveedor" in missing_fields:
-        conf = min(conf, 65.0)
-        if not extracted.get("low_confidence_reason"):
-            extracted["low_confidence_reason"] = f"No se detectaron con claridad campos críticos: {', '.join(missing_fields)}."
+    is_invoice_or_receipt = any(k in detected_category for k in ["Factura", "Recibo", "Cobro"])
+
+    # Penalización automática solo si es factura/recibo y faltan campos críticos
+    if is_invoice_or_receipt:
+        missing_fields = []
+        if not extracted.get("emisor_nombre") and not extracted.get("proveedor"):
+            missing_fields.append("proveedor")
+        if not extracted.get("monto_total") or float(extracted.get("monto_total", 0)) <= 0:
+            missing_fields.append("monto_total")
+        if not extracted.get("emisor_nit") and "Factura" in detected_category:
+            missing_fields.append("NIT")
+
+        if "monto_total" in missing_fields or "proveedor" in missing_fields:
+            conf = min(conf, 65.0)
+            if not extracted.get("low_confidence_reason"):
+                extracted["low_confidence_reason"] = f"No se detectaron con claridad campos críticos: {', '.join(missing_fields)}."
 
     conf = round(max(0.0, min(100.0, conf)), 1)
     extracted["confidence_score"] = conf
@@ -203,11 +222,11 @@ REGLAS ESTRICTAS:
         f"- {i['cantidad']}x {i['descripcion']}: ${i['subtotal']:,.0f}" for i in cleaned_items
     ])
     enriched_text = (
-        f"FACTURA PROCESADA POR VISIÓN POR COMPUTADOR ({filename})\n"
-        f"Proveedor: {extracted.get('emisor_nombre') or 'N/A'} | NIT: {extracted.get('emisor_nit') or 'N/A'}\n"
-        f"Factura N°: {extracted.get('numero_factura') or 'N/A'} | Fecha: {extracted.get('fecha_emision') or 'N/A'}\n"
-        f"Monto Total: ${extracted.get('monto_total', 0):,.2f} {extracted.get('moneda', 'COP')} | Confianza Visual: {conf}%\n"
-        f"Ítems / Productos:\n{items_txt}\n\n"
+        f"DOCUMENTO PROCESADO POR VISIÓN POR COMPUTADOR ({filename}) - Categoría: {detected_category}\n"
+        f"Resumen: {parsed.get('summary') or ''}\n"
+        f"Emisor/Postulante: {extracted.get('emisor_nombre') or extracted.get('postulante') or extracted.get('partes') or 'N/A'} | NIT: {extracted.get('emisor_nit') or 'N/A'}\n"
+        f"Monto/Valor: ${extracted.get('monto_total', 0):,.2f} {extracted.get('moneda', 'COP')} | Confianza Visual: {conf}%\n"
+        f"{('Ítems / Productos:\n' + items_txt + '\n\n') if items_txt else ''}"
         f"Texto Transcrito:\n{ocr_text}"
     ).strip()
 
@@ -243,8 +262,8 @@ REGLAS ESTRICTAS:
             logger.warning(f"No se pudo registrar log de visión: {log_err}")
 
     return {
-        "category": parsed.get("category") or "Facturas y Cuentas de Cobro",
-        "summary": parsed.get("summary") or f"Factura de {extracted.get('emisor_nombre', 'proveedor')} por ${extracted.get('monto_total', 0):,.0f}",
+        "category": detected_category,
+        "summary": parsed.get("summary") or f"Documento analizado por Visión IA ({detected_category})",
         "extracted_data": extracted,
         "raw_text": enriched_text,
         "confidence_score": conf,

@@ -14,7 +14,7 @@ from app.workflows.invoice_workflow import (
 )
 from app.vision_service import is_image_file, _clean_number
 from app.workflows.rag_agent import add_to_session_history, get_session_history
-from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data
+from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, build_protected_extracted_data
 from app.email_service import generate_email_action_token, verify_email_action_token
 
 client = TestClient(app)
@@ -93,17 +93,27 @@ def test_05_langchain_conversational_memory_by_session():
 
 
 def test_06_security_ley1581_encryption_and_email_hmac():
-    """Verifica el cifrado en reposo (Ley 1581) y la firma criptográfica HMAC de botones de correo."""
+    """Verifica el cifrado en reposo sin exposición de PII (Ley 1581) y la firma criptográfica HMAC de botones de correo."""
     sensitive_payload = {
         "emisor_nombre": "Clínica Sanitas S.A.",
         "emisor_nit": "800.251.440-6",
+        "postulante": "Carlos Andrés Gómez",
         "monto_total": 1420000.0
     }
-    encrypted_token = encrypt_sensitive_data(sensitive_payload)
+    protected_db_obj = build_protected_extracted_data(sensitive_payload)
+    assert protected_db_obj["_ley1581_protected"] is True
+    # Verificar que los datos personales (PII) NO quedan en texto plano en la raíz del JSONB
+    assert "emisor_nit" not in protected_db_obj
+    assert "postulante" not in protected_db_obj
+    assert "***" in protected_db_obj["emisor_nit_masked"]
+    assert "***" in protected_db_obj["postulante_masked"]
+
+    encrypted_token = protected_db_obj["_encrypted_data"]
     assert isinstance(encrypted_token, str) and encrypted_token.startswith("ENC::")
 
     decrypted_payload = decrypt_sensitive_data(encrypted_token)
     assert decrypted_payload["emisor_nit"] == "800.251.440-6"
+    assert decrypted_payload["postulante"] == "Carlos Andrés Gómez"
     assert decrypted_payload["monto_total"] == 1420000.0
 
     # Validar firma de enlaces interactivos de correo

@@ -96,13 +96,24 @@ def send_html_email(
         return {"sent": False, "reason": str(e)}
 
 
+def _get_public_base_url() -> str:
+    """Obtiene la URL pública del backend (soporta variable explícita o autodetección en Railway)."""
+    explicit = os.getenv("BACKEND_PUBLIC_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if railway_domain:
+        return f"https://{railway_domain}".rstrip("/")
+    return "http://localhost:8000"
+
+
 def send_invoice_approval_email(db: Session, document: Document, extracted: Dict[str, Any]) -> Dict[str, Any]:
     """
     Envía el correo interactivo al gerente cuando una factura >= $1.000.000 COP requiere aprobación.
     Los botones apuntan directamente al backend FastAPI (/api/documents/{id}/email-action).
     """
     start_time = time.time()
-    base_url = os.getenv("BACKEND_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+    base_url = _get_public_base_url()
 
     approve_token = generate_email_action_token(document.id, "approve_invoice")
     reject_token = generate_email_action_token(document.id, "reject_invoice")
@@ -253,7 +264,7 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
         return {"decision": "EN_RESERVA", "folder": "Banco de Talentos"}
 
     # Si score >= 80%, enviar correo interactivo de Scouting al gerente
-    base_url = os.getenv("BACKEND_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+    base_url = _get_public_base_url()
     hire_token = generate_email_action_token(document.id, "hire_candidate")
     pool_token = generate_email_action_token(document.id, "reserve_candidate")
 

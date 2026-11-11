@@ -156,3 +156,55 @@ def sanitize_error_log(error_message: Optional[str]) -> str:
     text = re.sub(r'://([^:]+):([^@]+)@', r'://\1:***REDACTED_PASSWORD***@', text)
 
     return text
+
+
+def mask_pii(value: Optional[str]) -> Optional[str]:
+    """
+    Enmascara datos personales identificables (PII) como NIT, cédula, nombre o teléfono
+    para que en la vista cruda de base de datos no queden expuestos en texto plano
+    (Cumplimiento Ley 1581 de 2012 - Minimización y Cifrado en Reposo).
+    """
+    if not value:
+        return None
+    s = str(value).strip()
+    if len(s) <= 4:
+        return "***"
+    return s[:2] + ("*" * max(3, len(s) - 4)) + s[-2:]
+
+
+def build_protected_extracted_data(extracted: Optional[dict]) -> dict:
+    """
+    Construye el objeto JSONB seguro para almacenar en PostgreSQL:
+    1. Cifra la totalidad de los datos extraídos (incluyendo PII de hojas de vida y facturas)
+       en el campo '_encrypted_data' usando AES-128-CBC + HMAC-SHA256 (Fernet).
+    2. Conserva en el nivel superior únicamente indicadores numéricos/operativos no sensibles
+       para indexación y enmascara cualquier identificador personal o tributario.
+    """
+    if not isinstance(extracted, dict):
+        extracted = {}
+
+    # Evitar doble anidamiento si ya venía con _encrypted_data
+    clean_payload = {k: v for k, v in extracted.items() if k != "_encrypted_data"}
+
+    monto = clean_payload.get("monto_total") if clean_payload.get("monto_total") is not None else clean_payload.get("total")
+
+    return {
+        "_encrypted_data": encrypt_sensitive_data(clean_payload),
+        "_ley1581_protected": True,
+        "_encryption_standard": "AES-128-CBC+HMAC-SHA256 (Fernet) / RSA-2048",
+        "match_score": clean_payload.get("match_score"),
+        "gemini_score": clean_payload.get("gemini_score"),
+        "semantic_score": clean_payload.get("semantic_score"),
+        "anos_experiencia": clean_payload.get("anos_experiencia"),
+        "total": monto,
+        "monto_total": monto,
+        "moneda": clean_payload.get("moneda"),
+        "confidence_score": clean_payload.get("confidence_score"),
+        "processed_by_vision": clean_payload.get("processed_by_vision", False),
+        "human_verified": clean_payload.get("human_verified", False),
+        "estado_contable": clean_payload.get("estado_contable"),
+        # Campos PII enmascarados en vista directa de BD (se descifran en memoria solo para usuarios autenticados)
+        "postulante_masked": mask_pii(clean_payload.get("postulante")),
+        "emisor_nit_masked": mask_pii(clean_payload.get("emisor_nit")),
+    }
+

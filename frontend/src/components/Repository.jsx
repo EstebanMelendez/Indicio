@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   UploadCloud, FileText, Trash2, Eye, Folder, FolderPlus, Search,
-  AlertCircle, Camera, Image as ImageIcon, ArrowLeft, Receipt, Briefcase, Mail, RefreshCw
+  AlertCircle, Camera, Image as ImageIcon, ArrowLeft, Receipt, Briefcase,
+  Mail, RefreshCw, ShieldCheck, Calendar, Layers, ChevronDown, ChevronRight,
+  ArrowUpDown, CheckSquare, FolderInput
 } from 'lucide-react';
 import { documentAPI, folderAPI, emailAPI } from '../services/api';
+import { groupItemsByMonthAndWeek } from '../utils/dateGrouping';
 import DocumentViewer from './DocumentViewer';
 
 export default function Repository({ folders, documents, fetchData }) {
@@ -19,6 +22,22 @@ export default function Repository({ folders, documents, fetchData }) {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [dateFilter, setDateFilter] = useState('');
+
+  // Controles de organización para alto volumen de archivos
+  const [viewMode, setViewMode] = useState('grouped'); // 'grouped' (Mes/Semana) | 'paginated' (Tabla paginada)
+  const [sortBy, setSortBy] = useState('date_desc');
+  const [folderGroupTab, setFolderGroupTab] = useState('all'); // 'all' | 'invoices' | 'hr' | 'other'
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Selección múltiple (acciones en lote)
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [targetMoveFolderId, setTargetMoveFolderId] = useState('');
+  const [bulkLoading, setBulkLoading] = useState(false);
+
+  // Acordeones Mes -> Semana
+  const [openMonths, setOpenMonths] = useState({});
+  const [openWeeks, setOpenWeeks] = useState({});
 
   // Local state for documents fetched with filters
   const [filteredDocs, setFilteredDocs] = useState([]);
@@ -50,6 +69,12 @@ export default function Repository({ folders, documents, fetchData }) {
       return () => clearTimeout(timer);
     }
   }, [searchFilter, categoryFilter, statusFilter, dateFilter, documents]);
+
+  // Limpiar selección y reiniciar paginación al cambiar de carpeta o filtros
+  useEffect(() => {
+    setSelectedIds([]);
+    setCurrentPage(1);
+  }, [currentFolder, searchFilter, categoryFilter, statusFilter, dateFilter, sortBy]);
 
   const uploadSingleFile = async (file) => {
     if (!file) return;
@@ -144,9 +169,158 @@ export default function Repository({ folders, documents, fetchData }) {
     if (!window.confirm('¿Eliminar documento de forma permanente?')) return;
     try {
       await documentAPI.delete(id);
+      setSelectedIds((prev) => prev.filter((item) => item !== id));
       fetchData();
     } catch (e) {
       alert('Error al eliminar documento');
+    }
+  };
+
+  // Acciones en lote (Mover o Eliminar seleccionados)
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) return;
+    if (!window.confirm(`¿Eliminar permanentemente los ${selectedIds.length} documentos seleccionados?`)) return;
+    setBulkLoading(true);
+    try {
+      await Promise.all(selectedIds.map((id) => documentAPI.delete(id)));
+      setSelectedIds([]);
+      fetchData();
+    } catch (e) {
+      alert('No se pudieron eliminar todos los documentos seleccionados (verifica permisos de rol Admin).');
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleBulkMove = async () => {
+    if (selectedIds.length === 0 || !targetMoveFolderId) return;
+    setBulkLoading(true);
+    try {
+      const folderIdNum = Number(targetMoveFolderId);
+      await Promise.all(
+        selectedIds.map((id) => documentAPI.update(id, { folder_id: folderIdNum }))
+      );
+      setSelectedIds([]);
+      setTargetMoveFolderId('');
+      fetchData();
+    } catch (e) {
+      alert('Error moviendo los documentos seleccionados.');
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const hasActiveFilters = Boolean(searchFilter || categoryFilter || statusFilter || dateFilter);
+
+  const getDocAmount = (doc) => {
+    const ext = doc?.extracted_data || {};
+    return Number(ext.monto_total ?? ext.total ?? 0) || 0;
+  };
+
+  const getDocScore = (doc) => {
+    const ext = doc?.extracted_data || {};
+    if (ext.confidence_score !== undefined && ext.confidence_score !== null) {
+      return Number(ext.confidence_score);
+    }
+    if (ext.match_score !== undefined && ext.match_score !== null) {
+      return Number(ext.match_score);
+    }
+    return -1;
+  };
+
+  // Filtrado por carpeta actual + Ordenamiento inteligente
+  const sortedDisplayDocs = useMemo(() => {
+    const base = filteredDocs.filter((doc) => {
+      if (hasActiveFilters) return true;
+      return currentFolder ? doc.folder_id === currentFolder.id : doc.folder_id === null;
+    });
+
+    const copy = [...base];
+    copy.sort((a, b) => {
+      if (sortBy === 'date_desc') {
+        return new Date(b.created_at || 0) - new Date(a.created_at || 0) || b.id - a.id;
+      }
+      if (sortBy === 'date_asc') {
+        return new Date(a.created_at || 0) - new Date(b.created_at || 0) || a.id - b.id;
+      }
+      if (sortBy === 'amount_desc') {
+        return getDocAmount(b) - getDocAmount(a);
+      }
+      if (sortBy === 'amount_asc') {
+        return getDocAmount(a) - getDocAmount(b);
+      }
+      if (sortBy === 'confidence_asc') {
+        const sa = getDocScore(a) < 0 ? 999 : getDocScore(a);
+        const sb = getDocScore(b) < 0 ? 999 : getDocScore(b);
+        return sa - sb;
+      }
+      if (sortBy === 'confidence_desc') {
+        return getDocScore(b) - getDocScore(a);
+      }
+      if (sortBy === 'name_asc') {
+        return (a.filename || '').localeCompare(b.filename || '');
+      }
+      return b.id - a.id;
+    });
+    return copy;
+  }, [filteredDocs, hasActiveFilters, currentFolder, sortBy]);
+
+  // Agrupación por Mes -> Semana (solo semanas con archivos subidos)
+  const groupedDocs = useMemo(() => {
+    return groupItemsByMonthAndWeek(sortedDisplayDocs, 'created_at');
+  }, [sortedDisplayDocs]);
+
+  // Abrir automáticamente el mes y semana más reciente al entrar
+  useEffect(() => {
+    if (groupedDocs.length > 0) {
+      const latestM = groupedDocs[0];
+      setOpenMonths((prev) => ({ ...prev, [latestM.monthKey]: prev[latestM.monthKey] ?? true }));
+      if (latestM.weeks.length > 0) {
+        const latestW = latestM.weeks[0];
+        setOpenWeeks((prev) => ({ ...prev, [latestW.weekKey]: prev[latestW.weekKey] ?? true }));
+      }
+    }
+  }, [groupedDocs]);
+
+  const toggleMonth = (monthKey) => {
+    setOpenMonths((prev) => ({ ...prev, [monthKey]: !prev[monthKey] }));
+  };
+
+  const toggleWeek = (weekKey) => {
+    setOpenWeeks((prev) => ({ ...prev, [weekKey]: !prev[weekKey] }));
+  };
+
+  const expandOrCollapseAll = (expand) => {
+    if (!expand) {
+      setOpenMonths({});
+      setOpenWeeks({});
+      return;
+    }
+    const nextM = {};
+    const nextW = {};
+    groupedDocs.forEach((m) => {
+      nextM[m.monthKey] = true;
+      m.weeks.forEach((w) => {
+        nextW[w.weekKey] = true;
+      });
+    });
+    setOpenMonths(nextM);
+    setOpenWeeks(nextW);
+  };
+
+  const toggleSelectDoc = (id) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectGroup = (docsInGroup) => {
+    const ids = docsInGroup.map((d) => d.id);
+    const allSelected = ids.every((id) => selectedIds.includes(id));
+    if (allSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !ids.includes(id)));
+    } else {
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...ids])));
     }
   };
 
@@ -163,16 +337,34 @@ export default function Repository({ folders, documents, fetchData }) {
     );
   }
 
-  const hasActiveFilters = Boolean(searchFilter || categoryFilter || statusFilter || dateFilter);
-
-  const displayDocs = filteredDocs.filter(doc => {
-    if (hasActiveFilters) return true;
-    return currentFolder ? doc.folder_id === currentFolder.id : doc.folder_id === null;
-  });
-
   const isImageFilename = (name = '') => /\.(jpg|jpeg|png|webp)$/i.test(name);
 
-  const getFolderDocCount = (folderId) => documents.filter(d => d.folder_id === folderId).length;
+  const getFolderMetrics = (folderId) => {
+    const docsInFolder = documents.filter((d) => d.folder_id === folderId);
+    const totalAmount = docsInFolder.reduce((acc, d) => acc + getDocAmount(d), 0);
+    const reviewCount = docsInFolder.filter((d) => d.status === 'Requiere Revisión').length;
+    return {
+      count: docsInFolder.length,
+      totalAmount,
+      reviewCount
+    };
+  };
+
+  const classifyFolderType = (name = '') => {
+    const n = name.toLowerCase();
+    if (n.includes('factura') || n.includes('aprobaci') || n.includes('revisión') || n.includes('cobro')) {
+      return 'invoices';
+    }
+    if (n.includes('talento') || n.includes('candidato') || n.includes('vacante') || n.includes('rrhh')) {
+      return 'hr';
+    }
+    return 'other';
+  };
+
+  const visibleFolders = folders.filter((f) => {
+    if (folderGroupTab === 'all') return true;
+    return classifyFolderType(f.name) === folderGroupTab;
+  });
 
   const getFolderStyle = (name = '') => {
     if (name.includes('Aprobadas') || name.includes('Seleccionados')) return 'border-emerald-200 bg-emerald-50/40 text-emerald-700';
@@ -253,6 +445,176 @@ export default function Repository({ folders, documents, fetchData }) {
     );
   };
 
+  const renderDocsTable = (docsSubset) => {
+    const allInSubsetSelected =
+      docsSubset.length > 0 && docsSubset.every((d) => selectedIds.includes(d.id));
+
+    return (
+      <div className="overflow-x-auto">
+        <table className="w-full text-left">
+          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-xs uppercase font-bold tracking-wider">
+            <tr>
+              <th className="p-3.5 w-10 text-center">
+                <input
+                  type="checkbox"
+                  checked={allInSubsetSelected}
+                  onChange={() => toggleSelectGroup(docsSubset)}
+                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                  title="Seleccionar todos los documentos de esta sección"
+                />
+              </th>
+              <th className="p-3.5">Documento / Fecha & Autor</th>
+              <th className="p-3.5">Categoría</th>
+              <th className="p-3.5">Resumen Clave / Valor IA</th>
+              <th className="p-3.5">Estado & Confianza</th>
+              <th className="p-3.5 text-right">Acciones</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {docsSubset.map((doc) => {
+              const confScore = doc.extracted_data?.confidence_score;
+              const isSelected = selectedIds.includes(doc.id);
+              const createdStr = doc.created_at
+                ? new Date(doc.created_at).toLocaleDateString('es-CO', {
+                    day: '2-digit',
+                    month: 'short',
+                    year: 'numeric'
+                  })
+                : '';
+
+              return (
+                <tr
+                  key={`doc-${doc.id}`}
+                  onClick={() => setSelectedDoc(doc)}
+                  className={`transition-colors cursor-pointer ${
+                    isSelected ? 'bg-indigo-50/60' : 'hover:bg-slate-50/90'
+                  }`}
+                >
+                  <td
+                    className="p-3.5 text-center"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSelectDoc(doc.id);
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => {}}
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                  </td>
+
+                  <td className="p-3.5 font-medium text-slate-800">
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-lg border ${
+                        isImageFilename(doc.filename)
+                          ? 'bg-indigo-50 border-indigo-100 text-indigo-600'
+                          : 'bg-slate-50 border-slate-200 text-slate-500'
+                      }`}>
+                        {isImageFilename(doc.filename) ? (
+                          <ImageIcon className="w-5 h-5" />
+                        ) : (
+                          <FileText className="w-5 h-5" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-slate-800 truncate max-w-[230px]" title={doc.filename}>
+                          {doc.filename}
+                        </div>
+                        <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                          {createdStr && <span>📅 {createdStr}</span>}
+                          <span>· {doc.uploaded_by ? doc.uploaded_by : 'Subida directa'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+
+                  <td className="p-3.5">
+                    <span className="inline-block text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                      {doc.category || 'Sin Clasificar'}
+                    </span>
+                  </td>
+
+                  <td className="p-3.5">
+                    {renderExtractedPreview(doc)}
+                  </td>
+
+                  <td className="p-3.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        doc.status === 'Procesado' ? 'bg-emerald-100 text-emerald-800' :
+                        doc.status === 'Requiere Revisión' ? 'bg-amber-100 text-amber-800 border border-amber-300' :
+                        doc.status === 'Error' ? 'bg-red-100 text-red-700' :
+                        (doc.status === 'Procesando' || doc.status === 'Pendiente') ? 'bg-blue-100 text-blue-700' :
+                        'bg-amber-100 text-amber-700'
+                      }`}>
+                        {doc.status}
+                      </span>
+                      {confScore !== undefined && confScore !== null && (
+                        <span
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                            Number(confScore) >= 80
+                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                              : 'bg-amber-50 text-amber-800 border border-amber-300'
+                          }`}
+                          title="Nivel de confianza de Visión Computacional"
+                        >
+                          🎯 {Number(confScore).toFixed(0)}%
+                        </span>
+                      )}
+                      {doc.status === 'Error' && doc.error_log && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            alert(`Error Técnico:\n\n${doc.error_log}`);
+                          }}
+                          className="text-red-500 hover:text-red-700 transition-colors"
+                          title="Ver detalle del error"
+                        >
+                          <AlertCircle className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+
+                  <td className="p-3.5 text-right" onClick={(e) => e.stopPropagation()}>
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        onClick={() => setSelectedDoc(doc)}
+                        className="text-indigo-600 hover:text-indigo-800 transition-colors p-2 rounded-lg hover:bg-indigo-50 cursor-pointer"
+                        title="Ver Detalles y Validación Humana"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(doc.id)}
+                        className="text-rose-500 hover:text-rose-700 transition-colors p-2 rounded-lg hover:bg-rose-50 cursor-pointer"
+                        title="Eliminar"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  // Paginación para vista de tabla continua
+  const totalPages = Math.max(1, Math.ceil(sortedDisplayDocs.length / pageSize));
+  const paginatedDocs = sortedDisplayDocs.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
+
+  // Totales de la carpeta actual cuando se está dentro de una carpeta
+  const currentFolderTotalAmount = sortedDisplayDocs.reduce((acc, d) => acc + getDocAmount(d), 0);
+
   return (
     <div
       onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
@@ -263,7 +625,7 @@ export default function Repository({ folders, documents, fetchData }) {
       {/* CABECERA */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {currentFolder && (
               <button
                 onClick={() => setCurrentFolder(null)}
@@ -273,7 +635,7 @@ export default function Repository({ folders, documents, fetchData }) {
                 <ArrowLeft className="w-4 h-4" />
               </button>
             )}
-            <h2 className="text-3xl font-bold flex items-center tracking-tight">
+            <h2 className="text-3xl font-bold flex items-center tracking-tight flex-wrap">
               <span
                 className="cursor-pointer hover:underline text-slate-900"
                 onClick={() => setCurrentFolder(null)}
@@ -287,10 +649,19 @@ export default function Repository({ folders, documents, fetchData }) {
                 </>
               )}
             </h2>
+            {currentFolder && currentFolderTotalAmount > 0 && (
+              <span className="text-xs font-black bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1 rounded-full">
+                💰 Acumulado en carpeta: ${currentFolderTotalAmount.toLocaleString('es-CO')} COP
+              </span>
+            )}
           </div>
           <p className="text-sm text-slate-500 mt-1">
             Arrastra y suelta documentos (`.pdf`, `.docx`, `.txt`) o fotografías de facturas (`.jpg`, `.png`, `.webp`) para su análisis automático.
           </p>
+          <div className="inline-flex items-center gap-1.5 mt-2 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span>Ley 1581 de 2012 Activa: Cifrado en reposo (AES-128 + RSA-2048), aislamiento multi-tenant y auditoría de autor.</span>
+          </div>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -372,81 +743,67 @@ export default function Repository({ folders, documents, fetchData }) {
         </div>
       )}
 
-      {/* BARRA DE FILTROS */}
-      <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 flex flex-wrap gap-3 items-center">
-        <div className="flex-1 relative min-w-[220px]">
-          <Search className="w-4 h-4 absolute left-3.5 top-3 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Buscar por nombre de archivo..."
-            value={searchFilter}
-            onChange={e => setSearchFilter(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-        </div>
-        <div className="min-w-[180px]">
-          <select
-            value={categoryFilter}
-            onChange={e => setCategoryFilter(e.target.value)}
-            className="w-full border border-slate-200 py-2 px-3 text-sm rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
-          >
-            <option value="">Todas las Categorías</option>
-            <option value="Facturas y Cuentas de Cobro">Facturas y Cuentas de Cobro</option>
-            <option value="Recibos y Comprobantes de Pago">Recibos y Comprobantes de Pago</option>
-            <option value="Contratos y Acuerdos Legales">Contratos y Acuerdos Legales</option>
-            <option value="Hojas de Vida / Perfiles Laborales">Hojas de Vida / Perfiles Laborales</option>
-            <option value="Sin Clasificar">Sin Clasificar</option>
-          </select>
-        </div>
-        <div className="min-w-[170px]">
-          <select
-            value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value)}
-            className="w-full border border-slate-200 py-2 px-3 text-sm rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
-          >
-            <option value="">Todos los Estados</option>
-            <option value="Pendiente">Pendiente</option>
-            <option value="Procesando">Procesando</option>
-            <option value="Procesado">Procesado</option>
-            <option value="Requiere Revisión">Requiere Revisión (&lt;80%)</option>
-            <option value="Error">Error</option>
-          </select>
-        </div>
-        <div className="min-w-[150px]">
-          <input
-            type="date"
-            value={dateFilter}
-            onChange={e => setDateFilter(e.target.value)}
-            className="w-full border border-slate-200 py-2 px-3 text-sm rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer text-slate-600"
-          />
-        </div>
-      </div>
-
-      {/* TARJETAS DE CARPETAS INTELIGENTES (ESTILO GOOGLE DRIVE) */}
+      {/* TARJETAS DE CARPETAS INTELIGENTES CON TOTALES Y PESTAÑAS */}
       {!currentFolder && !hasActiveFilters && folders.length > 0 && (
-        <div>
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
-            Carpetas de Clasificación Automática ({folders.length})
-          </h3>
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Carpetas de Clasificación Automática ({visibleFolders.length} de {folders.length})
+              </h3>
+            </div>
+            <div className="inline-flex rounded-xl bg-slate-100 p-1 text-xs font-semibold">
+              {[
+                { id: 'all', label: '📁 Todas' },
+                { id: 'invoices', label: '🧾 Cuentas por Pagar' },
+                { id: 'hr', label: '💼 Talento RRHH' },
+                { id: 'other', label: '📥 Bandejas / Otras' }
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setFolderGroupTab(tab.id)}
+                  className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
+                    folderGroupTab === tab.id
+                      ? 'bg-white text-indigo-700 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
-            {folders.map(folder => {
-              const count = getFolderDocCount(folder.id);
+            {visibleFolders.map((folder) => {
+              const { count, totalAmount, reviewCount } = getFolderMetrics(folder.id);
               const styleClass = getFolderStyle(folder.name);
               return (
                 <div
                   key={`card-folder-${folder.id}`}
                   onClick={() => setCurrentFolder(folder)}
-                  className={`p-4 rounded-xl border shadow-2xs hover:shadow-md transition-all cursor-pointer flex items-center justify-between group ${styleClass}`}
+                  className={`p-4 rounded-xl border shadow-2xs hover:shadow-md transition-all cursor-pointer flex items-start justify-between group ${styleClass}`}
                 >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Folder className="w-7 h-7 shrink-0 fill-current opacity-85" />
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold text-slate-800 truncate group-hover:text-indigo-700">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <Folder className="w-7 h-7 shrink-0 fill-current opacity-85 mt-0.5" />
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="text-sm font-bold text-slate-800 truncate group-hover:text-indigo-700" title={folder.name}>
                         {folder.name}
                       </p>
-                      <p className="text-xs text-slate-500 font-medium">
+                      <p className="text-xs text-slate-500 font-semibold">
                         {count} {count === 1 ? 'documento' : 'documentos'}
                       </p>
+                      {totalAmount > 0 && (
+                        <p className="text-[11px] font-black text-emerald-700">
+                          💰 ${totalAmount.toLocaleString('es-CO')} COP
+                        </p>
+                      )}
+                      {reviewCount > 0 && (
+                        <span className="inline-block text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                          ⚠️ {reviewCount} por revisar
+                        </span>
+                      )}
                     </div>
                   </div>
                   <button
@@ -466,131 +823,344 @@ export default function Repository({ folders, documents, fetchData }) {
         </div>
       )}
 
-      {/* TABLA DE DOCUMENTOS ENRIQUECIDA */}
-      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-xs uppercase font-bold tracking-wider">
-            <tr>
-              <th className="p-4">Documento / Autor</th>
-              <th className="p-4">Categoría</th>
-              <th className="p-4">Resumen Clave / Valor IA</th>
-              <th className="p-4">Estado & Confianza</th>
-              <th className="p-4 text-right">Acciones</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {displayDocs.map(doc => {
-              const confScore = doc.extracted_data?.confidence_score;
-              return (
-                <tr
-                  key={`doc-${doc.id}`}
-                  onClick={() => setSelectedDoc(doc)}
-                  className="hover:bg-slate-50/90 transition-colors cursor-pointer"
+      {/* BARRA DE FILTROS + ORDENAMIENTO + SELECTOR DE VISTA (MES/SEMANA VS PAGINADA) */}
+      <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 space-y-3">
+        <div className="flex flex-wrap gap-3 items-center">
+          <div className="flex-1 relative min-w-[200px]">
+            <Search className="w-4 h-4 absolute left-3.5 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Buscar por nombre de archivo..."
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              className="w-full pl-10 pr-4 py-1.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          <div className="min-w-[175px]">
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="w-full border border-slate-200 py-1.5 px-3 text-xs font-medium rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
+            >
+              <option value="">Todas las Categorías</option>
+              <option value="Facturas y Cuentas de Cobro">Facturas y Cuentas de Cobro</option>
+              <option value="Recibos y Comprobantes de Pago">Recibos y Comprobantes de Pago</option>
+              <option value="Contratos y Acuerdos Legales">Contratos y Acuerdos Legales</option>
+              <option value="Hojas de Vida / Perfiles Laborales">Hojas de Vida / Perfiles Laborales</option>
+              <option value="Sin Clasificar">Sin Clasificar</option>
+            </select>
+          </div>
+
+          <div className="min-w-[160px]">
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full border border-slate-200 py-1.5 px-3 text-xs font-medium rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
+            >
+              <option value="">Todos los Estados</option>
+              <option value="Pendiente">Pendiente</option>
+              <option value="Procesando">Procesando</option>
+              <option value="Procesado">Procesado</option>
+              <option value="Requiere Revisión">Requiere Revisión (&lt;80%)</option>
+              <option value="Error">Error</option>
+            </select>
+          </div>
+
+          <div className="min-w-[140px]">
+            <input
+              type="date"
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="w-full border border-slate-200 py-1.5 px-3 text-xs font-medium rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer text-slate-600"
+            />
+          </div>
+        </div>
+
+        {/* SEGUNDA FILA DE CONTROLES: ORDENAR POR + MODO DE VISTA */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-500 flex items-center gap-1">
+              <ArrowUpDown className="w-3.5 h-3.5 text-indigo-600" /> Ordenar archivos:
+            </span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-semibold bg-slate-50 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+            >
+              <option value="date_desc">🕒 Más recientes primero</option>
+              <option value="date_asc">🕰️ Más antiguos primero</option>
+              <option value="amount_desc">💰 Mayor monto ($) primero</option>
+              <option value="amount_asc">💵 Menor monto ($) primero</option>
+              <option value="confidence_asc">🎯 Menor confianza IA primero (Revisión)</option>
+              <option value="confidence_desc">⭐ Mayor confianza / Match % primero</option>
+              <option value="name_asc">🔤 Nombre de archivo (A - Z)</option>
+            </select>
+
+            <span className="text-xs text-slate-400 font-medium ml-2">
+              Mostrando <strong>{sortedDisplayDocs.length}</strong> {sortedDisplayDocs.length === 1 ? 'archivo' : 'archivos'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {viewMode === 'grouped' && groupedDocs.length > 0 && (
+              <div className="flex items-center gap-1.5 mr-2">
+                <button
+                  type="button"
+                  onClick={() => expandOrCollapseAll(true)}
+                  className="text-[11px] font-semibold text-indigo-600 hover:underline cursor-pointer"
                 >
-                  <td className="p-4 font-medium text-slate-800">
-                    <div className="flex items-center gap-3">
-                      <div className={`p-2 rounded-lg border ${
-                        isImageFilename(doc.filename)
-                          ? 'bg-indigo-50 border-indigo-100 text-indigo-600'
-                          : 'bg-slate-50 border-slate-200 text-slate-500'
-                      }`}>
-                        {isImageFilename(doc.filename) ? (
-                          <ImageIcon className="w-5 h-5" />
-                        ) : (
-                          <FileText className="w-5 h-5" />
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-sm font-bold text-slate-800 truncate max-w-[240px]" title={doc.filename}>
-                          {doc.filename}
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          {doc.uploaded_by ? `Por: ${doc.uploaded_by}` : 'Subida directa'}
-                        </div>
-                      </div>
-                    </div>
-                  </td>
-
-                  <td className="p-4">
-                    <span className="inline-block text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
-                      {doc.category || 'Sin Clasificar'}
-                    </span>
-                  </td>
-
-                  <td className="p-4">
-                    {renderExtractedPreview(doc)}
-                  </td>
-
-                  <td className="p-4">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
-                        doc.status === 'Procesado' ? 'bg-emerald-100 text-emerald-800' :
-                        doc.status === 'Requiere Revisión' ? 'bg-amber-100 text-amber-800 border border-amber-300' :
-                        doc.status === 'Error' ? 'bg-red-100 text-red-700' :
-                        (doc.status === 'Procesando' || doc.status === 'Pendiente') ? 'bg-blue-100 text-blue-700' :
-                        'bg-amber-100 text-amber-700'
-                      }`}>
-                        {doc.status}
-                      </span>
-                      {confScore !== undefined && confScore !== null && (
-                        <span
-                          className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
-                            Number(confScore) >= 80
-                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
-                              : 'bg-amber-50 text-amber-800 border border-amber-300'
-                          }`}
-                          title="Nivel de confianza de Visión Computacional"
-                        >
-                          🎯 {Number(confScore).toFixed(0)}%
-                        </span>
-                      )}
-                      {doc.status === 'Error' && doc.error_log && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            alert(`Error Técnico:\n\n${doc.error_log}`);
-                          }}
-                          className="text-red-500 hover:text-red-700 transition-colors"
-                          title="Ver detalle del error"
-                        >
-                          <AlertCircle className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-
-                  <td className="p-4 text-right" onClick={e => e.stopPropagation()}>
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        onClick={() => setSelectedDoc(doc)}
-                        className="text-indigo-600 hover:text-indigo-800 transition-colors p-2 rounded-lg hover:bg-indigo-50 cursor-pointer"
-                        title="Ver Detalles y Validación Humana"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(doc.id)}
-                        className="text-rose-500 hover:text-rose-700 transition-colors p-2 rounded-lg hover:bg-rose-50 cursor-pointer"
-                        title="Eliminar"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-
-            {displayDocs.length === 0 && (
-              <tr>
-                <td colSpan="5" className="p-10 text-center text-slate-400">
-                  No hay documentos en esta vista. Usa los botones superiores o arrastra una factura aquí.
-                </td>
-              </tr>
+                  Expandir todo
+                </button>
+                <span className="text-slate-300">|</span>
+                <button
+                  type="button"
+                  onClick={() => expandOrCollapseAll(false)}
+                  className="text-[11px] font-semibold text-slate-500 hover:underline cursor-pointer"
+                >
+                  Contraer todo
+                </button>
+              </div>
             )}
-          </tbody>
-        </table>
+
+            <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-1">
+              <button
+                type="button"
+                onClick={() => setViewMode('grouped')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  viewMode === 'grouped'
+                    ? 'bg-white text-indigo-700 shadow-2xs border border-slate-200/80'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" /> Por Mes / Semana
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('paginated')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  viewMode === 'paginated'
+                    ? 'bg-white text-indigo-700 shadow-2xs border border-slate-200/80'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" /> Tabla Paginada
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
+
+      {/* BARRA DE ACCIONES EN LOTE CUANDO HAY ARCHIVOS SELECCIONADOS */}
+      {selectedIds.length > 0 && (
+        <div className="bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-200">
+          <div className="flex items-center gap-2 text-xs font-bold">
+            <CheckSquare className="w-4 h-4 text-indigo-400" />
+            <span>{selectedIds.length} documento(s) seleccionado(s)</span>
+            <button
+              type="button"
+              onClick={() => setSelectedIds([])}
+              className="text-slate-400 hover:text-white underline ml-2 font-normal cursor-pointer"
+            >
+              Deseleccionar
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <FolderInput className="w-4 h-4 text-indigo-300" />
+              <select
+                value={targetMoveFolderId}
+                onChange={(e) => setTargetMoveFolderId(e.target.value)}
+                className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">Mover seleccionados a carpeta...</option>
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    📁 {f.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={!targetMoveFolderId || bulkLoading}
+                onClick={handleBulkMove}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+              >
+                Mover
+              </button>
+            </div>
+
+            <button
+              type="button"
+              disabled={bulkLoading}
+              onClick={handleBulkDelete}
+              className="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Eliminar ({selectedIds.length})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* LISTADO PRINCIPAL DE DOCUMENTOS: AGRUPADO POR MES -> SEMANA O TABLA PAGINADA */}
+      {sortedDisplayDocs.length === 0 ? (
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-10 text-center text-slate-400">
+          No hay documentos en esta vista. Usa los botones superiores o arrastra una factura aquí.
+        </div>
+      ) : viewMode === 'grouped' ? (
+        <div className="space-y-4">
+          {groupedDocs.map((monthGroup) => {
+            const isMonthOpen = !!openMonths[monthGroup.monthKey];
+            const monthAmount = monthGroup.weeks.reduce(
+              (sum, w) => sum + w.items.reduce((s2, d) => s2 + getDocAmount(d), 0),
+              0
+            );
+
+            return (
+              <div
+                key={monthGroup.monthKey}
+                className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden"
+              >
+                {/* CABECERA DEL MES */}
+                <button
+                  type="button"
+                  onClick={() => toggleMonth(monthGroup.monthKey)}
+                  className="w-full px-5 py-3.5 bg-gradient-to-r from-slate-900 to-indigo-950 text-white flex flex-wrap items-center justify-between gap-2 hover:opacity-95 transition-opacity cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5">
+                    {isMonthOpen ? (
+                      <ChevronDown className="w-4 h-4 text-indigo-300" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-indigo-300" />
+                    )}
+                    <Calendar className="w-4 h-4 text-indigo-300" />
+                    <span className="text-sm font-bold tracking-wide">{monthGroup.monthLabel}</span>
+                    <span className="text-[11px] bg-white/15 text-indigo-100 px-2.5 py-0.5 rounded-full font-semibold">
+                      {monthGroup.weeks.length} {monthGroup.weeks.length === 1 ? 'semana activa' : 'semanas activas'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2.5">
+                    {monthAmount > 0 && (
+                      <span className="text-xs font-bold bg-emerald-500/25 border border-emerald-400/30 text-emerald-100 px-3 py-1 rounded-full">
+                        💰 ${monthAmount.toLocaleString('es-CO')} COP
+                      </span>
+                    )}
+                    <span className="text-xs font-bold bg-indigo-500/30 border border-indigo-400/30 px-3 py-1 rounded-full">
+                      {monthGroup.totalItems} {monthGroup.totalItems === 1 ? 'archivo' : 'archivos'}
+                    </span>
+                  </div>
+                </button>
+
+                {/* SEMANAS DEL MES (SOLO LAS QUE TIENEN ARCHIVOS) */}
+                {isMonthOpen && (
+                  <div className="p-4 space-y-3 bg-slate-50/40">
+                    {monthGroup.weeks.map((weekGroup) => {
+                      const isWeekOpen = !!openWeeks[weekGroup.weekKey];
+                      const weekAmount = weekGroup.items.reduce((acc, d) => acc + getDocAmount(d), 0);
+                      const weekReviews = weekGroup.items.filter(
+                        (d) => d.status === 'Requiere Revisión'
+                      ).length;
+
+                      return (
+                        <div
+                          key={weekGroup.weekKey}
+                          className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleWeek(weekGroup.weekKey)}
+                            className="w-full px-4 py-3 bg-slate-50 hover:bg-indigo-50/40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 transition-colors cursor-pointer"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              {isWeekOpen ? (
+                                <ChevronDown className="w-4 h-4 text-indigo-600" />
+                              ) : (
+                                <ChevronRight className="w-4 h-4 text-slate-400" />
+                              )}
+                              <span className="text-xs font-black uppercase tracking-wider text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-md">
+                                {weekGroup.weekTitle}
+                              </span>
+                              <span className="text-xs font-semibold text-slate-700">
+                                {weekGroup.weekRange}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {weekAmount > 0 && (
+                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  💰 Subtotal: ${weekAmount.toLocaleString('es-CO')} COP
+                                </span>
+                              )}
+                              {weekReviews > 0 && (
+                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                                  ⚠️ {weekReviews} por revisar
+                                </span>
+                              )}
+                              <span className="text-xs font-bold text-slate-600 bg-white border border-slate-200 px-2.5 py-0.5 rounded-full">
+                                {weekGroup.items.length} {weekGroup.items.length === 1 ? 'documento' : 'documentos'}
+                              </span>
+                            </div>
+                          </button>
+
+                          {isWeekOpen && renderDocsTable(weekGroup.items)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        /* MODO TABLA PAGINADA */
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
+          {renderDocsTable(paginatedDocs)}
+
+          {/* CONTROLES DE PAGINACIÓN */}
+          <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
+            <div className="flex items-center gap-2">
+              <span>Filas por página:</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="border border-slate-200 rounded-lg px-2 py-1 bg-white font-semibold"
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+              <span className="text-slate-400 ml-2">
+                Página <strong>{currentPage}</strong> de <strong>{totalPages}</strong> ({sortedDisplayDocs.length} documentos)
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={currentPage <= 1}
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold cursor-pointer"
+              >
+                ← Anterior
+              </button>
+              <button
+                type="button"
+                disabled={currentPage >= totalPages}
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold cursor-pointer"
+              >
+                Siguiente →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

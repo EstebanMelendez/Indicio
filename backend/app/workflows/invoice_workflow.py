@@ -4,7 +4,7 @@ from typing import TypedDict, Optional, Dict, Any
 from langgraph.graph import StateGraph, END
 from sqlalchemy.orm import Session
 from app.models import Document, Folder, WorkflowAuditLog
-from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data
+from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, build_protected_extracted_data
 
 logger = logging.getLogger("InvoiceWorkflow")
 
@@ -213,25 +213,18 @@ def execute_invoice_workflow(
 
     document.folder_id = folder.id
     
-    # Actualizar estado contable en el documento
+    # Actualizar estado contable en el documento (Cifrado en reposo Ley 1581)
     updated_ext = dict(raw_ext)
+    updated_ext["monto_total"] = monto
+    updated_ext["total"] = monto
+    updated_ext["emisor_nombre"] = proveedor
+    updated_ext["proveedor"] = proveedor
+    updated_ext["emisor_nit"] = nit
+    updated_ext["numero_factura"] = num_fac
+    updated_ext["confidence_score"] = confidence
     updated_ext["estado_contable"] = final_state["decision"]
     updated_ext["notas_auditoria"] = final_state["notes"]
-    document.extracted_data = {
-        "_encrypted_data": encrypt_sensitive_data(updated_ext),
-        "total": monto,
-        "monto_total": monto,
-        "proveedor": proveedor,
-        "emisor_nombre": proveedor,
-        "emisor_nit": nit,
-        "numero_factura": num_fac,
-        "fecha_emision": updated_ext.get("fecha_emision"),
-        "moneda": updated_ext.get("moneda", "COP"),
-        "items": updated_ext.get("items", []),
-        "confidence_score": confidence,
-        "processed_by_vision": updated_ext.get("processed_by_vision", False),
-        "estado_contable": final_state["decision"]
-    }
+    document.extracted_data = build_protected_extracted_data(updated_ext)
 
     # 2. Registrar en tabla de auditoría (WorkflowAuditLog)
     audit_entry = WorkflowAuditLog(

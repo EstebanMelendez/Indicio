@@ -37,6 +37,7 @@ export const documentAPI = {
   upload: (data) => api.post('/documents/upload', data, {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
+  update: (id, data) => api.patch(`/documents/${id}`, data),
   confirmVision: (id, data) => api.post(`/documents/${id}/confirm-vision`, data),
   delete: (id) => api.delete(`/documents/${id}`),
   download: (id) => api.get(`/documents/${id}/download`, { responseType: 'blob' }),

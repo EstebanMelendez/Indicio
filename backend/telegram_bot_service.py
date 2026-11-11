@@ -12,17 +12,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DocuMind-Telegram")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("TELEGRAM_BOT_TOKEN no está configurado en las variables de entorno (.env)")
-    raise ValueError("TELEGRAM_BOT_TOKEN no configurado en el archivo .env")
-
-masked_token = BOT_TOKEN[:6] + "..." + BOT_TOKEN[-4:] if len(BOT_TOKEN) > 10 else "***"
-logger.info(f"Iniciando servicio de Telegram Bot con token seguro: {masked_token}")
-
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
-BACKEND_BASE_URL = "http://127.0.0.1:8000/api"
+BACKEND_BASE_URL = f"http://127.0.0.1:{os.getenv('PORT', '8000')}/api"
 
 WELCOME_MESSAGE = """👋 *¡Hola! Soy el Asistente Inteligente de DocuMind (Indicio Enterprise).*
 
@@ -216,9 +209,20 @@ def process_telegram_photo(chat_id: int, user_name: str, file_id: str, custom_fi
 
 
 def run_bot():
+    global BOT_TOKEN, TELEGRAM_API_BASE, TELEGRAM_FILE_BASE, BACKEND_BASE_URL
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN no configurado en .env. El Bot de Telegram no se iniciará.")
+        return
+
+    TELEGRAM_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
+    BACKEND_BASE_URL = f"http://127.0.0.1:{os.getenv('PORT', '8000')}/api"
+
+    masked_token = BOT_TOKEN[:6] + "..." + BOT_TOKEN[-4:] if len(BOT_TOKEN) > 10 else "***"
     logger.info("==================================================")
     logger.info("🤖 DocuMind Telegram Bot (RAG + Visión Facturas)")
-    logger.info("Bot conectado a @Indicion8n_bot")
+    logger.info(f"Token activo: {masked_token} | Backend: {BACKEND_BASE_URL}")
     logger.info("Motor IA: FastAPI + LangChain + LangGraph + Gemini Vision")
     logger.info("==================================================")
 
