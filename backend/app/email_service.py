@@ -13,8 +13,8 @@ import time
 import threading
 from typing import Dict, Any, Optional, Callable
 from sqlalchemy.orm import Session
-from app.models import Document, Folder, WorkflowAuditLog
-from app.crypto import decrypt_sensitive_data, encrypt_sensitive_data
+from app.models import Document, Folder, WorkflowAuditLog, Tenant, User
+from app.crypto import decrypt_sensitive_data, encrypt_sensitive_data, mask_secret
 
 logger = logging.getLogger("IndicioEmailService")
 
@@ -37,24 +37,98 @@ def verify_email_action_token(doc_id: int, action: str, token: str) -> bool:
     return hmac.compare_digest(expected, token or "")
 
 
+def get_tenant_gmail_config(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """
+    Obtiene la configuración de correo Gmail enlazada al repositorio de una empresa (Tenant) específica.
+    Descifra en memoria la Contraseña de Aplicación (Ley 1581).
+    Para el Tenant #1 (Organización Principal), usa como respaldo las variables de backend/.env.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    gmail_user = ""
+    gmail_pass = ""
+
+    if tenant:
+        gmail_user = (tenant.gmail_user or "").strip()
+        if tenant.gmail_app_password_enc:
+            dec = decrypt_sensitive_data(tenant.gmail_app_password_enc)
+            if isinstance(dec, dict):
+                gmail_pass = (dec.get("app_password") or "").strip().replace(" ", "")
+            elif isinstance(dec, str):
+                gmail_pass = dec.strip().replace(" ", "")
+
+    # Respaldo automático para la Organización Principal (Tenant #1) desde .env
+    if tenant_id == 1:
+        if not gmail_user:
+            gmail_user = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
+        if not gmail_pass:
+            gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
+
+    # Buscar correo del Admin de esa empresa como destinatario de respaldo para notificaciones
+    admin_user = db.query(User).filter(User.tenant_id == tenant_id, User.role == "admin").order_by(User.id.asc()).first()
+    fallback_recipient = gmail_user or (admin_user.email if admin_user else os.getenv("GMAIL_NOTIFY_TO", ""))
+
+    return {
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name if tenant else f"Empresa #{tenant_id}",
+        "gmail_user": gmail_user,
+        "gmail_app_password": gmail_pass,
+        "has_imap_credentials": bool(gmail_user and gmail_pass),
+        "app_password_masked": mask_secret(gmail_pass) if gmail_pass else None,
+        "notify_recipient": fallback_recipient,
+        "storage_path": f"storage/tenant_{tenant_id}"
+    }
+
+
+def verify_gmail_imap_credentials(gmail_user: str, gmail_app_password: str) -> Dict[str, Any]:
+    """Verifica en vivo si el correo Gmail y su Contraseña de Aplicación (16 letras) autentican por IMAP SSL."""
+    clean_user = (gmail_user or "").strip()
+    clean_pass = (gmail_app_password or "").strip().replace(" ", "")
+    if not clean_user or not clean_pass:
+        return {"valid": False, "reason": "Debe proporcionar el correo Gmail y la Contraseña de Aplicación."}
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(clean_user, clean_pass)
+        mail.select("INBOX")
+        mail.logout()
+        return {"valid": True, "message": f"Conexión IMAP verificada exitosamente con {clean_user}."}
+    except Exception as e:
+        return {
+            "valid": False,
+            "reason": f"Google rechazó la conexión IMAP para '{clean_user}'. Verifique que sea una Contraseña de Aplicación de 16 letras válida ({e})."
+        }
+
+
 def send_html_email(
     subject: str,
     html_body: str,
     to_email: Optional[str] = None,
-    gmail_label: Optional[str] = None
+    gmail_label: Optional[str] = None,
+    smtp_user: Optional[str] = None,
+    smtp_pass: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Envía un correo HTML usando SMTP de Gmail con Contraseña de Aplicación (GMAIL_APP_PASSWORD)
-    y aplica automáticamente la etiqueta de Gmail (ej. 'APROBACIONES PENDIENTES' o 'HOJAS DE VIDA / RRHH') por IMAP.
+    Envía un correo HTML usando SMTP de Gmail con Contraseña de Aplicación
+    (de la empresa enlazada o del relé principal en backend/.env)
+    y aplica automáticamente la etiqueta de Gmail por IMAP.
     """
-    gmail_user = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
-    recipient = (to_email or os.getenv("GMAIL_NOTIFY_TO") or gmail_user).strip()
+    env_user = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
+    env_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
+
+    # Si la empresa tiene su propio Gmail + App Password enlazados, usar su propia cuenta SMTP/IMAP;
+    # de lo contrario, usar el relé SMTP del sistema para enviar al correo configurado de la empresa.
+    if smtp_user and smtp_pass:
+        gmail_user = smtp_user.strip()
+        gmail_pass = smtp_pass.strip().replace(" ", "")
+    else:
+        gmail_user = env_user
+        gmail_pass = env_pass
+
+    recipient = (to_email or smtp_user or os.getenv("GMAIL_NOTIFY_TO") or gmail_user).strip()
 
     if not gmail_user or not gmail_pass:
         return {
             "sent": False,
-            "reason": "Falta configurar GMAIL_APP_PASSWORD en backend/.env (Contraseña de aplicación de 16 letras de Google)."
+            "reason": "Falta enlazar la Contraseña de Aplicación de Gmail en la empresa o en backend/.env."
         }
 
     try:
@@ -190,7 +264,15 @@ def send_invoice_approval_email(db: Session, document: Document, extracted: Dict
     </div>
     """
 
-    res = send_html_email(subject, html_body, gmail_label="APROBACIONES PENDIENTES")
+    t_cfg = get_tenant_gmail_config(db, document.tenant_id or 1)
+    res = send_html_email(
+        subject,
+        html_body,
+        to_email=t_cfg["notify_recipient"],
+        gmail_label="APROBACIONES PENDIENTES",
+        smtp_user=t_cfg["gmail_user"] if t_cfg["has_imap_credentials"] else None,
+        smtp_pass=t_cfg["gmail_app_password"] if t_cfg["has_imap_credentials"] else None
+    )
     duration_ms = int((time.time() - start_time) * 1000)
 
     try:
@@ -294,7 +376,15 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
         </div>
     </div>
     """
-    res = send_html_email(subject, html_body, gmail_label="HOJAS DE VIDA / RRHH")
+    t_cfg = get_tenant_gmail_config(db, document.tenant_id or 1)
+    res = send_html_email(
+        subject,
+        html_body,
+        to_email=t_cfg["notify_recipient"],
+        gmail_label="HOJAS DE VIDA / RRHH",
+        smtp_user=t_cfg["gmail_user"] if t_cfg["has_imap_credentials"] else None,
+        smtp_pass=t_cfg["gmail_app_password"] if t_cfg["has_imap_credentials"] else None
+    )
     duration_ms = int((time.time() - start_time) * 1000)
 
     db.add(WorkflowAuditLog(
@@ -338,21 +428,23 @@ def send_general_status_email(document: Document, extracted: Dict[str, Any]) -> 
 PROCESSED_EMAIL_ATTACHMENTS = set()
 
 
-def check_gmail_inbox_once(
+def _sync_single_tenant_inbox(
+    tenant_id: int,
+    gmail_user: str,
+    gmail_pass: str,
     db_session_factory: Callable[[], Session],
     process_callback: Callable[[int, str, str], None],
     include_recent_read: bool = False
 ) -> Dict[str, Any]:
-    """
-    Revisa por IMAP (imap.gmail.com) si hay correos con archivos adjuntos,
-    los descarga a storage/tenant_1/, los registra en la carpeta 'Bandeja Correo' y dispara su procesamiento con IA.
-    Reemplaza 100% en Python el flujo 'Indicio - Ingesta' de n8n.
-    """
-    gmail_user = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
-
+    """Sincroniza la bandeja de entrada de una empresa (tenant_id) hacia su repositorio aislado storage/tenant_{tenant_id}/."""
     if not gmail_user or not gmail_pass:
-        return {"checked": False, "downloaded": 0, "files": [], "reason": "Falta configurar GMAIL_APP_PASSWORD en backend/.env"}
+        return {
+            "checked": False,
+            "downloaded": 0,
+            "files": [],
+            "tenant_id": tenant_id,
+            "reason": "Esta empresa aún no tiene un correo Gmail y Contraseña de Aplicación enlazados a su repositorio. Ve a 'Usuarios y Roles -> Enlace Gmail' para configurarlo."
+        }
 
     downloaded_files = []
     try:
@@ -364,7 +456,7 @@ def check_gmail_inbox_once(
         status, messages = mail.search(None, '(UNSEEN)')
         msg_ids = messages[0].split()[-8:] if (status == "OK" and messages and messages[0]) else []
 
-        # 2. Si se invocó desde el botón manual "Sincronizar Gmail" y no había UNSEEN (por si el usuario abrió el correo antes),
+        # 2. Si se invocó desde el botón manual "Sincronizar Gmail" y no había UNSEEN,
         # revisar los últimos 5 correos recibidos en la bandeja evitando duplicados.
         if include_recent_read and not msg_ids:
             status_all, messages_all = mail.search(None, 'ALL')
@@ -373,7 +465,7 @@ def check_gmail_inbox_once(
 
         if not msg_ids:
             mail.logout()
-            return {"checked": True, "downloaded": 0, "files": []}
+            return {"checked": True, "downloaded": 0, "files": [], "tenant_id": tenant_id, "gmail_user": gmail_user}
 
         for m_id in msg_ids:
             res, msg_data = mail.fetch(m_id, "(RFC822)")
@@ -414,7 +506,7 @@ def check_gmail_inbox_once(
                     if ext not in ALLOWED_ATTACHMENT_EXTS:
                         continue
 
-                    dedup_key = f"{msg_uid}::{clean_base}"
+                    dedup_key = f"tenant_{tenant_id}::{msg_uid}::{clean_base}"
                     if dedup_key in PROCESSED_EMAIL_ATTACHMENTS:
                         continue
 
@@ -424,9 +516,9 @@ def check_gmail_inbox_once(
 
                     db = db_session_factory()
                     try:
-                        # Verificar también en BD que no se haya importado ya ese mismo adjunto por tamaño y sufijo
+                        # Verificar también en BD que no se haya importado ya ese mismo adjunto en el repositorio de esta empresa
                         existing = db.query(Document).filter(
-                            Document.tenant_id == 1,
+                            Document.tenant_id == tenant_id,
                             Document.filename.ilike(f"%_{clean_base}"),
                             Document.file_size_bytes == len(payload_bytes)
                         ).first()
@@ -435,22 +527,22 @@ def check_gmail_inbox_once(
                             continue
 
                         safe_name = f"email_{int(time.time())}_{clean_base}"
-                        tenant_dir = "storage/tenant_1"
+                        tenant_dir = os.path.join("storage", f"tenant_{tenant_id}")
                         os.makedirs(tenant_dir, exist_ok=True)
                         file_path = os.path.join(tenant_dir, safe_name)
 
                         with open(file_path, "wb") as f:
                             f.write(payload_bytes)
 
-                        folder = db.query(Folder).filter(Folder.name == "Bandeja Correo", Folder.tenant_id == 1).first()
+                        folder = db.query(Folder).filter(Folder.name == "Bandeja Correo", Folder.tenant_id == tenant_id).first()
                         if not folder:
-                            folder = Folder(name="Bandeja Correo", tenant_id=1)
+                            folder = Folder(name="Bandeja Correo", tenant_id=tenant_id)
                             db.add(folder)
                             db.commit()
                             db.refresh(folder)
 
                         new_doc = Document(
-                            tenant_id=1,
+                            tenant_id=tenant_id,
                             filename=safe_name,
                             file_path=file_path,
                             mime_type=part.get_content_type() or "application/octet-stream",
@@ -464,14 +556,20 @@ def check_gmail_inbox_once(
                         db.refresh(new_doc)
 
                         db.add(WorkflowAuditLog(
-                            tenant_id=1,
+                            tenant_id=tenant_id,
                             document_id=new_doc.id,
                             workflow_name="IngestaCorreo-IMAP",
                             trigger_source="Gmail-IMAP",
                             user_email=gmail_user,
                             ai_provider="Python-IMAP-Worker",
-                            input_summary=f"Adjunto recibido de {sender[:45]}: {safe_name}",
-                            output_result={"folder": "Bandeja Correo", "document_id": new_doc.id, "decision": "DESCARGADO_A_BANDEJA_CORREO"},
+                            input_summary=f"Adjunto recibido de {sender[:45]}: {safe_name} -> storage/tenant_{tenant_id}/",
+                            output_result={
+                                "folder": "Bandeja Correo",
+                                "document_id": new_doc.id,
+                                "tenant_id": tenant_id,
+                                "gmail_user": gmail_user,
+                                "decision": "DESCARGADO_A_BANDEJA_CORREO"
+                            },
                             confidence_score=100,
                             status="SUCCESS",
                             execution_time_ms=120
@@ -491,8 +589,71 @@ def check_gmail_inbox_once(
                     downloaded_files.append(safe_name)
 
         mail.logout()
-        return {"checked": True, "downloaded": len(downloaded_files), "files": downloaded_files}
+        return {
+            "checked": True,
+            "downloaded": len(downloaded_files),
+            "files": downloaded_files,
+            "tenant_id": tenant_id,
+            "gmail_user": gmail_user
+        }
     except Exception as e:
-        logger.warning(f"[IMAP WARN] Error revisando bandeja de Gmail: {e}")
-        return {"checked": False, "downloaded": 0, "files": [], "reason": str(e)}
+        logger.warning(f"[IMAP WARN] Error revisando bandeja de Gmail (Tenant #{tenant_id} - {gmail_user}): {e}")
+        return {"checked": False, "downloaded": 0, "files": [], "tenant_id": tenant_id, "reason": str(e)}
+
+
+def check_gmail_inbox_once(
+    db_session_factory: Callable[[], Session],
+    process_callback: Callable[[int, str, str], None],
+    include_recent_read: bool = False,
+    target_tenant_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Revisa por IMAP (imap.gmail.com) los correos con archivos adjuntos de la empresa solicitada
+    (o de todas las empresas con Gmail enlazado cuando corre en segundo plano),
+    descargándolos directamente a storage/tenant_{id}/ y en la carpeta 'Bandeja Correo' de cada empresa.
+    """
+    db = db_session_factory()
+    try:
+        if target_tenant_id is not None:
+            cfg = get_tenant_gmail_config(db, target_tenant_id)
+            return _sync_single_tenant_inbox(
+                tenant_id=target_tenant_id,
+                gmail_user=cfg["gmail_user"],
+                gmail_pass=cfg["gmail_app_password"],
+                db_session_factory=db_session_factory,
+                process_callback=process_callback,
+                include_recent_read=include_recent_read
+            )
+
+        # Modo worker en segundo plano: sincronizar cada empresa que tenga credenciales IMAP enlazadas
+        tenants = db.query(Tenant).order_by(Tenant.id.asc()).all()
+        configs_to_sync = []
+        seen_accounts = set()
+        for t in tenants:
+            cfg = get_tenant_gmail_config(db, t.id)
+            if cfg["has_imap_credentials"]:
+                acct_key = cfg["gmail_user"].lower()
+                # Si dos empresas enlazaron cuentas distintas, sincronizar cada una a su propio tenant_id
+                if acct_key not in seen_accounts:
+                    seen_accounts.add(acct_key)
+                    configs_to_sync.append(cfg)
+    finally:
+        db.close()
+
+    total_downloaded = 0
+    all_files = []
+    for cfg in configs_to_sync:
+        res = _sync_single_tenant_inbox(
+            tenant_id=cfg["tenant_id"],
+            gmail_user=cfg["gmail_user"],
+            gmail_pass=cfg["gmail_app_password"],
+            db_session_factory=db_session_factory,
+            process_callback=process_callback,
+            include_recent_read=include_recent_read
+        )
+        total_downloaded += res.get("downloaded", 0)
+        all_files.extend(res.get("files", []))
+
+    return {"checked": True, "downloaded": total_downloaded, "files": all_files}
+
 

@@ -22,7 +22,7 @@ from app.vision_service import is_image_file, analyze_invoice_image
 from app.auth import get_current_user, create_access_token, verify_password, get_password_hash, oauth2_scheme, require_role
 from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log, build_protected_extracted_data
 from app.notifications import notify_document_status
-from app.email_service import verify_email_action_token, check_gmail_inbox_once
+from app.email_service import verify_email_action_token, check_gmail_inbox_once, get_tenant_gmail_config, verify_gmail_imap_credentials
 from app.fallback_service import call_groq_text
 import google.generativeai as genai
 import pdfplumber
@@ -85,26 +85,46 @@ def startup_db_check():
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user';"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;"))
             conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);"))
+            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gmail_user VARCHAR(255);"))
+            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gmail_app_password_enc TEXT;"))
             conn.commit()
         # Garantizar Tenant 1, usuarios semilla (admin, auditor, user, service) y protección Ley 1581
         from sqlalchemy.orm.attributes import flag_modified
         db_init = next(get_db())
         try:
             tenant = db_init.query(Tenant).filter(Tenant.id == 1).first()
+            env_gmail = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
+            env_gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
             if not tenant:
-                tenant = Tenant(id=1, name="Organización Principal")
+                tenant = Tenant(
+                    id=1,
+                    name="Organización Principal",
+                    gmail_user=env_gmail or None,
+                    gmail_app_password_enc=encrypt_sensitive_data({"app_password": env_gmail_pass}) if env_gmail_pass else None
+                )
                 db_init.add(tenant)
                 db_init.commit()
                 logger.info("[SEGURIDAD] Tenant inicial (ID 1: Organización Principal) creado automáticamente.")
+            else:
+                updated_t1 = False
+                if not tenant.gmail_user and env_gmail:
+                    tenant.gmail_user = env_gmail
+                    updated_t1 = True
+                if not tenant.gmail_app_password_enc and env_gmail_pass:
+                    tenant.gmail_app_password_enc = encrypt_sensitive_data({"app_password": env_gmail_pass})
+                    updated_t1 = True
+                if updated_t1:
+                    db_init.commit()
 
             seed_users = [
+                {"email": "AdminEstebanM@gmail.com", "pwd": os.getenv("SUPERADMIN_PASSWORD", "zoan2006"), "role": "superadmin"},
                 {"email": "indicio.admin@gmail.com", "pwd": os.getenv("ADMIN_PASSWORD", "admin123"), "role": "admin"},
                 {"email": "indicio.auditor@gmail.com", "pwd": os.getenv("AUDITOR_PASSWORD", "auditor123"), "role": "auditor"},
                 {"email": "indicio.user@gmail.com", "pwd": os.getenv("USER_PASSWORD", "user123"), "role": "user"},
                 {"email": "n8n.service@gmail.com", "pwd": os.getenv("N8N_SERVICE_PASSWORD", "n8n_secure_pwd_2026_xyz"), "role": "service"},
             ]
             for u_cfg in seed_users:
-                existing_user = db_init.query(User).filter(User.email == u_cfg["email"]).first()
+                existing_user = db_init.query(User).filter(func.lower(User.email) == u_cfg["email"].lower()).first()
                 if not existing_user:
                     db_init.add(User(
                         email=u_cfg["email"],
@@ -112,6 +132,11 @@ def startup_db_check():
                         role=u_cfg["role"],
                         tenant_id=1
                     ))
+                elif u_cfg["role"] == "superadmin":
+                    existing_user.role = "superadmin"
+                    existing_user.email = u_cfg["email"]
+                    if not verify_password(u_cfg["pwd"], existing_user.hashed_password):
+                        existing_user.hashed_password = get_password_hash(u_cfg["pwd"])
             db_init.commit()
 
             # Garantizar al menos 1 vacante abierta por defecto para que el emparejamiento de Hojas de Vida funcione de inmediato
@@ -223,6 +248,31 @@ def extract_text(file_path: str, filename: str) -> str:
             text_content = f.read()
     return text_content.strip()
 
+# --- VALIDACIONES ESTRICTAS DE CAMPOS Y SANITIZACIÓN (SEGURIDAD / LEY 1581) ---
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+def _validate_and_clean_email(raw_email: str) -> str:
+    email_val = (raw_email or "").strip()
+    if not email_val or len(email_val) > 120 or "<" in email_val or ">" in email_val or not EMAIL_REGEX.match(email_val):
+        raise HTTPException(status_code=400, detail="Formato de correo electrónico inválido.")
+    return email_val
+
+def _validate_password(raw_pwd: str, field_label: str = "contraseña") -> str:
+    pwd = (raw_pwd or "").strip()
+    if len(pwd) < 4:
+        raise HTTPException(status_code=400, detail=f"La {field_label} debe tener al menos 4 caracteres.")
+    if len(pwd.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail=f"La {field_label} no puede exceder los 72 caracteres.")
+    return pwd
+
+def _sanitize_entity_name(raw_name: str, field_label: str = "nombre") -> str:
+    cleaned = re.sub(r"[<>]", "", (raw_name or "")).strip()
+    if len(cleaned) < 2:
+        raise HTTPException(status_code=400, detail=f"El {field_label} debe tener al menos 2 caracteres válidos.")
+    if len(cleaned) > 120:
+        raise HTTPException(status_code=400, detail=f"El {field_label} no puede superar los 120 caracteres.")
+    return cleaned
+
 # --- ENDPOINTS ---
 class LoginRequest(BaseModel):
     email: str
@@ -230,19 +280,548 @@ class LoginRequest(BaseModel):
 
 @app.post("/api/auth/login")
 def login(login_data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == login_data.email).first()
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    clean_email = (login_data.email or "").strip().lower()
+    raw_pwd = (login_data.password or "").strip()
+    if not clean_email or not raw_pwd or len(raw_pwd.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
+    user = db.query(User).filter(func.lower(User.email) == clean_email).first()
+    if not user or not verify_password(raw_pwd, user.hashed_password):
         raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
     
     user_role = getattr(user, "role", "user") or "user"
     tenant_id = user.tenant_id if user.tenant_id is not None else 1
+    tenant_obj = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    tenant_name = tenant_obj.name if tenant_obj else f"Empresa #{tenant_id}"
     access_token = create_access_token(data={"sub": user.email, "role": user_role, "tenant_id": tenant_id})
     return {
         "access_token": access_token, 
         "token_type": "bearer",
         "role": user_role,
-        "tenant_id": tenant_id
+        "email": user.email,
+        "tenant_id": tenant_id,
+        "tenant_name": tenant_name
     }
+
+@app.get("/api/auth/me")
+def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tenant_obj = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+        "tenant_id": current_user.tenant_id,
+        "tenant_name": tenant_obj.name if tenant_obj else f"Empresa #{current_user.tenant_id}"
+    }
+
+# --- SUPERUSUARIO GLOBAL (CONSOLA SAAS MULTI-TENANT) ---
+class CreateTenantWithAdminRequest(BaseModel):
+    tenant_name: str
+    admin_email: str
+    admin_password: str
+    gmail_user: Optional[str] = None
+    gmail_app_password: Optional[str] = None
+    create_default_vacancy: bool = True
+
+class CreateTenantAdminRequest(BaseModel):
+    email: str
+    password: str
+    role: str = "admin"
+
+@app.get("/api/superadmin/tenants")
+def list_all_tenants(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["superadmin"]))
+):
+    """
+    Exclusivo para Superusuario (AdminEstebanM@gmail.com):
+    Lista todas las empresas (Tenants) registradas en la plataforma SaaS,
+    junto con sus administradores, usuarios y métricas de aislamiento.
+    """
+    tenants = db.query(Tenant).order_by(Tenant.id.asc()).all()
+    result = []
+    for t in tenants:
+        t_users = db.query(User).filter(
+            User.tenant_id == t.id,
+            User.role.notin_(["superadmin", "service"])
+        ).order_by(User.id.asc()).all()
+        docs_count = db.query(Document).filter(Document.tenant_id == t.id).count()
+        folders_count = db.query(Folder).filter(Folder.tenant_id == t.id).count()
+        vacancies_count = db.query(Vacancy).filter(Vacancy.tenant_id == t.id).count()
+        gmail_cfg = get_tenant_gmail_config(db, t.id)
+        result.append({
+            "id": t.id,
+            "name": t.name,
+            "created_at": t.created_at,
+            "storage_path": f"storage/tenant_{t.id}/",
+            "gmail_user": gmail_cfg["gmail_user"] or None,
+            "gmail_linked": gmail_cfg["has_imap_credentials"],
+            "users_count": len(t_users),
+            "documents_count": docs_count,
+            "folders_count": folders_count,
+            "vacancies_count": vacancies_count,
+            "admins": [{"id": u.id, "email": u.email, "role": u.role} for u in t_users if u.role == "admin"],
+            "users": [{"id": u.id, "email": u.email, "role": u.role} for u in t_users]
+        })
+    return {
+        "superadmin_email": current_user.email,
+        "total_tenants": len(result),
+        "tenants": result
+    }
+
+@app.post("/api/superadmin/tenants")
+def create_tenant_with_admin(
+    payload: CreateTenantWithAdminRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["superadmin"]))
+):
+    """
+    Exclusivo para Superusuario:
+    Crea una nueva Empresa (Tenant), su carpeta de almacenamiento aislada
+    y el usuario Administrador inicial de esa empresa.
+    """
+    tenant_name = _sanitize_entity_name(payload.tenant_name, "nombre de la empresa")
+    admin_email = _validate_and_clean_email(payload.admin_email)
+    admin_pwd = _validate_password(payload.admin_password, "contraseña del administrador")
+
+    existing_tenant = db.query(Tenant).filter(func.lower(Tenant.name) == tenant_name.lower()).first()
+    if existing_tenant:
+        raise HTTPException(status_code=400, detail=f"Ya existe una empresa registrada con el nombre '{tenant_name}'.")
+
+    existing_user = db.query(User).filter(func.lower(User.email) == admin_email.lower()).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail=f"El correo '{admin_email}' ya está registrado en el sistema.")
+
+    clean_gmail_user = None
+    clean_gmail_enc = None
+    if payload.gmail_user and payload.gmail_user.strip():
+        clean_gmail_user = _validate_and_clean_email(payload.gmail_user)
+    if payload.gmail_app_password and payload.gmail_app_password.strip():
+        raw_app_pwd = payload.gmail_app_password.strip().replace(" ", "")
+        clean_gmail_enc = encrypt_sensitive_data({"app_password": raw_app_pwd})
+
+    new_tenant = Tenant(
+        name=tenant_name,
+        gmail_user=clean_gmail_user,
+        gmail_app_password_enc=clean_gmail_enc
+    )
+    db.add(new_tenant)
+    db.commit()
+    db.refresh(new_tenant)
+
+    # Crear directorio físico aislado para la nueva empresa
+    tenant_dir = os.path.join("storage", f"tenant_{new_tenant.id}")
+    os.makedirs(tenant_dir, exist_ok=True)
+
+    # Crear usuario Administrador de la nueva empresa
+    new_admin = User(
+        email=admin_email,
+        hashed_password=get_password_hash(admin_pwd),
+        role="admin",
+        tenant_id=new_tenant.id
+    )
+    db.add(new_admin)
+
+    # Crear vacante inicial opcional para la nueva empresa
+    if payload.create_default_vacancy:
+        db.add(Vacancy(
+            tenant_id=new_tenant.id,
+            title=f"Analista Corporativo - {tenant_name}",
+            department="Operaciones y Tecnología",
+            description=f"Vacante corporativa para procesos de selección en {tenant_name}.",
+            requirements="Profesional con experiencia en gestión documental, análisis de procesos y herramientas digitales.",
+            min_years_experience=2,
+            required_skills=["Gestión Documental", "Análisis", "Excel", "Automatización"],
+            status="Abierta"
+        ))
+
+    # Registrar auditoría de creación Multi-Tenant
+    db.add(WorkflowAuditLog(
+        tenant_id=new_tenant.id,
+        workflow_name="SaaS-MultiTenant",
+        trigger_source="SuperAdminConsole",
+        user_email=current_user.email,
+        ai_provider="RBAC Engine",
+        input_summary=f"Alta de nueva empresa '{tenant_name}' (Tenant #{new_tenant.id}) con Admin inicial '{admin_email}'",
+        output_result={
+            "action": "CREATE_TENANT_AND_ADMIN",
+            "tenant_id": new_tenant.id,
+            "tenant_name": tenant_name,
+            "admin_email": admin_email,
+            "storage_path": f"storage/tenant_{new_tenant.id}/"
+        },
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=10
+    ))
+
+    db.commit()
+    db.refresh(new_admin)
+
+    return {
+        "message": f"Empresa '{tenant_name}' y su Administrador '{admin_email}' creados exitosamente.",
+        "tenant": {
+            "id": new_tenant.id,
+            "name": new_tenant.name,
+            "created_at": new_tenant.created_at,
+            "storage_path": f"storage/tenant_{new_tenant.id}/"
+        },
+        "admin": {
+            "id": new_admin.id,
+            "email": new_admin.email,
+            "role": new_admin.role,
+            "tenant_id": new_tenant.id
+        }
+    }
+
+@app.post("/api/superadmin/tenants/{tenant_id}/users")
+def superadmin_add_user_to_tenant(
+    tenant_id: int,
+    payload: CreateTenantAdminRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["superadmin"]))
+):
+    """Permite al Superusuario crear un Admin adicional (u otro rol) en una empresa existente."""
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa (Tenant) no encontrada.")
+
+    email = _validate_and_clean_email(payload.email)
+    pwd = _validate_password(payload.password, "contraseña")
+    role = (payload.role or "admin").strip().lower()
+    if role not in ["admin", "auditor", "user"]:
+        raise HTTPException(status_code=400, detail="Rol inválido. Use 'admin', 'auditor' o 'user'.")
+
+    if db.query(User).filter(func.lower(User.email) == email.lower()).first():
+        raise HTTPException(status_code=400, detail=f"El correo '{email}' ya está registrado.")
+
+    new_user = User(
+        email=email,
+        hashed_password=get_password_hash(pwd),
+        role=role,
+        tenant_id=tenant.id
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {
+        "message": f"Usuario '{email}' ({role}) agregado a '{tenant.name}'.",
+        "user": {"id": new_user.id, "email": new_user.email, "role": new_user.role, "tenant_id": tenant.id}
+    }
+
+@app.delete("/api/superadmin/tenants/{tenant_id}")
+def superadmin_delete_tenant(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["superadmin"]))
+):
+    """Permite al Superusuario eliminar una empresa secundaria y su almacenamiento."""
+    if tenant_id == 1:
+        raise HTTPException(status_code=400, detail="No se puede eliminar la Organización Principal (Tenant #1).")
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada.")
+    tenant_name = tenant.name
+    tenant_dir = os.path.join("storage", f"tenant_{tenant.id}")
+    db.delete(tenant)
+    db.commit()
+    if os.path.exists(tenant_dir):
+        shutil.rmtree(tenant_dir, ignore_errors=True)
+    return {"message": f"Empresa '{tenant_name}' (Tenant #{tenant_id}) eliminada correctamente."}
+
+# --- GESTIÓN DE USUARIOS POR ADMINISTRADOR DE EMPRESA (SOLO ROL 'ADMIN') ---
+class CreateCompanyUserRequest(BaseModel):
+    email: str
+    password: str
+    role: str = "user" # "user", "auditor", "admin"
+
+class UpdateCompanyUserRoleRequest(BaseModel):
+    role: str
+
+class UpdateCompanyUserPasswordRequest(BaseModel):
+    password: str
+
+class UpdateTenantEmailConfigRequest(BaseModel):
+    gmail_user: str
+    gmail_app_password: Optional[str] = None
+    verify_connection: bool = False
+
+@app.get("/api/admin/email-config")
+def get_company_email_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """Retorna el correo Gmail enlazado al repositorio de la empresa actual."""
+    cfg = get_tenant_gmail_config(db, current_user.tenant_id)
+    return {
+        "tenant_id": cfg["tenant_id"],
+        "tenant_name": cfg["tenant_name"],
+        "storage_path": f"{cfg['storage_path']}/",
+        "gmail_user": cfg["gmail_user"],
+        "has_imap_credentials": cfg["has_imap_credentials"],
+        "app_password_masked": cfg["app_password_masked"]
+    }
+
+@app.put("/api/admin/email-config")
+def update_company_email_config(
+    payload: UpdateTenantEmailConfigRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """
+    Exclusivo para el Administrador de cada empresa (rol 'admin'):
+    Permite enlazar el correo Gmail y su Contraseña de Aplicación (cifrada en reposo Ley 1581)
+    con el repositorio aislado de la empresa (storage/tenant_{id}/).
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada.")
+
+    clean_gmail = _validate_and_clean_email(payload.gmail_user)
+    raw_app_pwd = (payload.gmail_app_password or "").strip().replace(" ", "")
+
+    # Si no envió una nueva contraseña de aplicación, conservar la que ya tenía la empresa
+    existing_cfg = get_tenant_gmail_config(db, current_user.tenant_id)
+    effective_app_pwd = raw_app_pwd if raw_app_pwd else existing_cfg["gmail_app_password"]
+
+    if payload.verify_connection:
+        if not effective_app_pwd:
+            raise HTTPException(
+                status_code=400,
+                detail="Para verificar la conexión IMAP debe ingresar la Contraseña de Aplicación de 16 letras de Google."
+            )
+        check_res = verify_gmail_imap_credentials(clean_gmail, effective_app_pwd)
+        if not check_res["valid"]:
+            raise HTTPException(status_code=400, detail=check_res["reason"])
+
+    tenant.gmail_user = clean_gmail
+    if raw_app_pwd:
+        if len(raw_app_pwd) < 8 or len(raw_app_pwd) > 64:
+            raise HTTPException(
+                status_code=400,
+                detail="La Contraseña de Aplicación de Google debe tener 16 letras (sin importar espacios)."
+            )
+        tenant.gmail_app_password_enc = encrypt_sensitive_data({"app_password": raw_app_pwd})
+
+    db.add(WorkflowAuditLog(
+        tenant_id=current_user.tenant_id,
+        workflow_name="IAM-GestionUsuarios",
+        trigger_source="AdminPanel",
+        user_email=current_user.email,
+        ai_provider="Gmail-Repository-Link",
+        input_summary=f"Enlace de correo Gmail '{clean_gmail}' con repositorio storage/tenant_{current_user.tenant_id}/",
+        output_result={
+            "action": "LINK_TENANT_GMAIL",
+            "tenant_id": current_user.tenant_id,
+            "gmail_user": clean_gmail,
+            "imap_ready": bool(effective_app_pwd),
+            "storage_path": f"storage/tenant_{current_user.tenant_id}/"
+        },
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=15
+    ))
+    db.commit()
+
+    updated_cfg = get_tenant_gmail_config(db, current_user.tenant_id)
+    return {
+        "message": f"Correo '{clean_gmail}' enlazado exitosamente al repositorio de '{tenant.name}' (storage/tenant_{tenant.id}/).",
+        "config": {
+            "tenant_id": updated_cfg["tenant_id"],
+            "tenant_name": updated_cfg["tenant_name"],
+            "storage_path": f"{updated_cfg['storage_path']}/",
+            "gmail_user": updated_cfg["gmail_user"],
+            "has_imap_credentials": updated_cfg["has_imap_credentials"],
+            "app_password_masked": updated_cfg["app_password_masked"]
+        }
+    }
+
+@app.get("/api/admin/users")
+def list_company_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """
+    Exclusivo para el Administrador de cada empresa (rol 'admin'):
+    Lista todos los usuarios y auditores pertenecientes únicamente a su empresa (tenant_id).
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    users = db.query(User).filter(
+        User.tenant_id == current_user.tenant_id,
+        User.role.notin_(["superadmin", "service"])
+    ).order_by(User.id.asc()).all()
+
+    return {
+        "tenant_id": current_user.tenant_id,
+        "tenant_name": tenant.name if tenant else f"Empresa #{current_user.tenant_id}",
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "role": u.role,
+                "tenant_id": u.tenant_id,
+                "is_current_user": u.id == current_user.id
+            }
+            for u in users
+        ]
+    }
+
+@app.post("/api/admin/users")
+def create_company_user(
+    payload: CreateCompanyUserRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """
+    Exclusivo para el Administrador de cada empresa:
+    Permite crear usuarios ('user'), auditores ('auditor') u otros administradores ('admin')
+    dentro de su propia empresa (tenant_id).
+    """
+    role = (payload.role or "user").strip().lower()
+    if role not in ["user", "auditor", "admin"]:
+        raise HTTPException(status_code=400, detail="Rol no permitido. Solo puede asignar 'user', 'auditor' o 'admin'.")
+    email = _validate_and_clean_email(payload.email)
+    password = _validate_password(payload.password, "contraseña")
+
+    existing = db.query(User).filter(func.lower(User.email) == email.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"El correo '{email}' ya se encuentra registrado.")
+
+    new_user = User(
+        email=email,
+        hashed_password=get_password_hash(password),
+        role=role,
+        tenant_id=current_user.tenant_id
+    )
+    db.add(new_user)
+
+    db.add(WorkflowAuditLog(
+        tenant_id=current_user.tenant_id,
+        workflow_name="IAM-GestionUsuarios",
+        trigger_source="AdminPanel",
+        user_email=current_user.email,
+        ai_provider="RBAC Ley 1581",
+        input_summary=f"Creación de cuenta '{email}' con rol '{role}' por Admin '{current_user.email}'",
+        output_result={
+            "action": "CREATE_COMPANY_USER",
+            "created_email": email,
+            "assigned_role": role,
+            "tenant_id": current_user.tenant_id
+        },
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=8
+    ))
+
+    db.commit()
+    db.refresh(new_user)
+
+    return {
+        "message": f"Usuario '{email}' creado exitosamente con el rol '{role}'.",
+        "user": {
+            "id": new_user.id,
+            "email": new_user.email,
+            "role": new_user.role,
+            "tenant_id": new_user.tenant_id
+        }
+    }
+
+@app.patch("/api/admin/users/{user_id}/role")
+def update_company_user_role(
+    user_id: int,
+    payload: UpdateCompanyUserRoleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """Permite al Admin de la empresa cambiar el rol ('user', 'auditor', 'admin') de un miembro de su empresa."""
+    new_role = (payload.role or "").strip().lower()
+    if new_role not in ["user", "auditor", "admin"]:
+        raise HTTPException(status_code=400, detail="Rol inválido. Use 'user', 'auditor' o 'admin'.")
+
+    target_user = db.query(User).filter(
+        User.id == user_id,
+        User.tenant_id == current_user.tenant_id,
+        User.role.notin_(["superadmin", "service"])
+    ).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en su empresa.")
+    if target_user.id == current_user.id and new_role != "admin":
+        raise HTTPException(status_code=400, detail="No puede quitarse a sí mismo el rol de Administrador.")
+
+    old_role = target_user.role
+    target_user.role = new_role
+
+    db.add(WorkflowAuditLog(
+        tenant_id=current_user.tenant_id,
+        workflow_name="IAM-GestionUsuarios",
+        trigger_source="AdminPanel",
+        user_email=current_user.email,
+        ai_provider="RBAC Ley 1581",
+        input_summary=f"Cambio de rol para '{target_user.email}': '{old_role}' -> '{new_role}'",
+        output_result={"action": "UPDATE_USER_ROLE", "user_email": target_user.email, "old_role": old_role, "new_role": new_role},
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=5
+    ))
+    db.commit()
+    return {"message": f"Rol de '{target_user.email}' actualizado a '{new_role}'.", "role": new_role}
+
+@app.patch("/api/admin/users/{user_id}/password")
+def update_company_user_password(
+    user_id: int,
+    payload: UpdateCompanyUserPasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """Permite al Admin de la empresa restablecer la contraseña de un miembro de su empresa."""
+    new_pwd = _validate_password(payload.password, "nueva contraseña")
+
+    target_user = db.query(User).filter(
+        User.id == user_id,
+        User.tenant_id == current_user.tenant_id,
+        User.role.notin_(["superadmin", "service"])
+    ).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en su empresa.")
+
+    target_user.hashed_password = get_password_hash(new_pwd)
+    db.commit()
+    return {"message": f"Contraseña de '{target_user.email}' actualizada correctamente."}
+
+@app.delete("/api/admin/users/{user_id}")
+def delete_company_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """Permite al Admin de la empresa dar de baja/eliminar a un usuario o auditor de su empresa."""
+    target_user = db.query(User).filter(
+        User.id == user_id,
+        User.tenant_id == current_user.tenant_id,
+        User.role.notin_(["superadmin", "service"])
+    ).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en su empresa.")
+    if target_user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="No puede eliminar su propia cuenta de Administrador en sesión.")
+
+    deleted_email = target_user.email
+    deleted_role = target_user.role
+    db.delete(target_user)
+
+    db.add(WorkflowAuditLog(
+        tenant_id=current_user.tenant_id,
+        workflow_name="IAM-GestionUsuarios",
+        trigger_source="AdminPanel",
+        user_email=current_user.email,
+        ai_provider="RBAC Ley 1581",
+        input_summary=f"Revocación y baja de usuario '{deleted_email}' (rol: {deleted_role})",
+        output_result={"action": "DELETE_COMPANY_USER", "deleted_email": deleted_email, "deleted_role": deleted_role},
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=6
+    ))
+    db.commit()
+    return {"message": f"Usuario '{deleted_email}' eliminado de la empresa."}
 
 @app.post("/api/auth/logout")
 def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -312,7 +891,7 @@ def get_security_compliance_status(
             "Usuarios y Trazabilidad: correo corporativo, rol RBAC, autor de carga (uploaded_by) y logs de auditoría"
         ],
         "controls": {
-            "user_protection": "Hashing bcrypt (Passlib), sesiones JWT HS256 (4h), revocación en BlacklistedToken y RBAC (admin, auditor, user)",
+            "user_protection": "Hashing bcrypt (Passlib), sesiones JWT HS256 (4h), revocación en BlacklistedToken y RBAC jerárquico (superadmin SaaS, admin de empresa, auditor Ley 1581, user operador)",
             "data_at_rest": "Cifrado autenticado AES-128-CBC + HMAC-SHA256 (Fernet) respaldado por RSA-2048 en PostgreSQL (_encrypted_data) y enmascaramiento de PII",
             "file_storage": f"Particionamiento físico por inquilino (storage/tenant_{current_user.tenant_id}/), sanitización anti-Path Traversal y descarga protegida por JWT",
             "data_in_transit": "TLS/HTTPS en despliegue, cabeceras HTTP anti-caché (no-store), enlaces de correo firmados con HMAC-SHA256 e IMAP4_SSL/SMTP_SSL"
@@ -328,7 +907,8 @@ class FolderCreate(BaseModel):
 
 @app.post("/api/folders")
 def create_folder(folder: FolderCreate, db: Session = Depends(get_db), current_user: User = Depends(require_role(["admin"]))):
-    new_folder = Folder(name=folder.name, tenant_id=current_user.tenant_id)
+    clean_folder_name = _sanitize_entity_name(folder.name, "nombre de la carpeta")
+    new_folder = Folder(name=clean_folder_name, tenant_id=current_user.tenant_id)
     db.add(new_folder)
     db.commit()
     db.refresh(new_folder)
@@ -619,7 +1199,7 @@ def match_document_to_vacancy(
     vacancy_id: int,
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin", "user"]))
 ):
     from sqlalchemy.orm.attributes import flag_modified
     vac = db.query(Vacancy).filter(Vacancy.id == vacancy_id, Vacancy.tenant_id == current_user.tenant_id).first()
@@ -630,11 +1210,15 @@ def match_document_to_vacancy(
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
         
-    raw_text = extract_text(doc.file_path, doc.filename)
+    chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).order_by(DocumentChunk.chunk_index.asc()).all()
+    raw_text = extract_text(doc.file_path, doc.filename) if os.path.exists(doc.file_path) else ""
+    if not raw_text and chunks:
+        raw_text = "\n".join([c.chunk_text for c in chunks if c.chunk_text])
+    if not raw_text and doc.summary:
+        raw_text = doc.summary
     if not raw_text:
         raise HTTPException(status_code=400, detail="No se pudo extraer texto del documento")
         
-    chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).all()
     semantic_score = calculate_semantic_similarity(vac.embedding, chunks)
     
     candidate_models = list(dict.fromkeys([
@@ -1318,8 +1902,10 @@ def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db), current_u
     Registra automáticamente cada consulta en workflow_audit_logs.
     """
     try:
-        session_id = payload.session_id or f"user_{current_user.id}"
-        trigger_src = "TelegramBot" if session_id.startswith("telegram_") else "WebRAG"
+        raw_session = payload.session_id or f"user_{current_user.id}"
+        trigger_src = "TelegramBot" if raw_session.startswith("telegram_") else "WebRAG"
+        # Aislar estrictamente la memoria conversacional por empresa (tenant_id) y usuario
+        session_id = raw_session if raw_session.startswith("telegram_") else f"tenant_{current_user.tenant_id}_u_{current_user.id}_{raw_session}"
         result = execute_rag_with_memory(
             query=payload.query,
             tenant_id=current_user.tenant_id,
@@ -1601,8 +2187,13 @@ def handle_email_action(
 
 @app.post("/api/email/sync-inbox")
 def sync_gmail_inbox_endpoint(current_user: User = Depends(require_role(["admin", "user", "service"]))):
-    """Permite disparar manualmente la revisión de correos entrantes con adjuntos por IMAP."""
-    return check_gmail_inbox_once(lambda: next(get_db()), process_document_background, include_recent_read=True)
+    """Permite disparar manualmente la revisión de correos entrantes con adjuntos por IMAP hacia el repositorio de la empresa actual."""
+    return check_gmail_inbox_once(
+        lambda: next(get_db()),
+        process_document_background,
+        include_recent_read=True,
+        target_tenant_id=current_user.tenant_id
+    )
 
 
 @app.get("/api/health")

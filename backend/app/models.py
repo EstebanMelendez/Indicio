@@ -10,6 +10,8 @@ class Tenant(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
+    gmail_user = Column(String(255), nullable=True)
+    gmail_app_password_enc = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     users = relationship("User", back_populates="tenant")

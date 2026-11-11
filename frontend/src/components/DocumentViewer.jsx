@@ -20,12 +20,14 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
   const isImage = /\.(jpg|jpeg|png|webp)$/i.test(doc.filename || '') || (doc.mime_type && doc.mime_type.startsWith('image/'));
 
   const ext = doc.extracted_data || {};
+  const role = sessionStorage.getItem('role') || 'user';
+  const canEditVision = role === 'admin' || role === 'user';
   const hasMatchScore = ext.match_score !== undefined && ext.match_score !== null;
   const confScore = ext.confidence_score !== undefined && ext.confidence_score !== null ? Number(ext.confidence_score) : null;
   const needsHumanReview = doc.status === 'Requiere Revisión' || (confScore !== null && confScore < 80);
 
   const [imagePreviewUrl, setImagePreviewUrl] = useState(null);
-  const [isEditingVision, setIsEditingVision] = useState(needsHumanReview);
+  const [isEditingVision, setIsEditingVision] = useState(needsHumanReview && canEditVision);
   const [savingVision, setSavingVision] = useState(false);
   const [workflowFeedback, setWorkflowFeedback] = useState(null);
 
@@ -198,14 +200,20 @@ export default function DocumentViewer({ doc, onClose, onDocUpdated }) {
                   <Receipt className="w-5 h-5 text-indigo-600" />
                   <span>Lectura Inteligente de Factura / Recibo (Cuentas por Pagar)</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingVision(!isEditingVision)}
-                  className="text-xs bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  {isEditingVision ? 'Cancelar Edición' : 'Editar / Validar Datos'}
-                </button>
+                {canEditVision ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingVision(!isEditingVision)}
+                    className="text-xs bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    {isEditingVision ? 'Cancelar Edición' : 'Editar / Validar Datos'}
+                  </button>
+                ) : (
+                  <span className="text-xs bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-lg font-semibold">
+                    👁️ Modo Auditoría (Solo Lectura)
+                  </span>
+                )}
               </div>
 
               {/* Alerta de Validación Humana si confianza < 80% */}

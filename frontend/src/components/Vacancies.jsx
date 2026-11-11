@@ -8,6 +8,9 @@ import { vacancyAPI, documentAPI } from '../services/api';
 import DocumentViewer from './DocumentViewer';
 
 export default function Vacancies({ documents, fetchData }) {
+  const role = sessionStorage.getItem('role') || 'user';
+  const isAdmin = role === 'admin';
+  const canOperate = role === 'admin' || role === 'user';
   const [vacancies, setVacancies] = useState([]);
   const [selectedVacancy, setSelectedVacancy] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -212,12 +215,14 @@ export default function Vacancies({ documents, fetchData }) {
               <strong> Inteligencia Cognitiva (Gemini IA)</strong> y <strong>Similitud Semántica Vectorial (pgvector)</strong>.
             </p>
           </div>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="inline-flex items-center justify-center gap-2 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white px-5 py-3 rounded-xl font-semibold shadow-lg hover:shadow-indigo-500/25 transition-all cursor-pointer whitespace-nowrap"
-          >
-            <Plus className="w-5 h-5" /> Nueva Vacante
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white px-5 py-3 rounded-xl font-semibold shadow-lg hover:shadow-indigo-500/25 transition-all cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-5 h-5" /> Nueva Vacante
+            </button>
+          )}
         </div>
 
         {/* Global KPI Cards */}
@@ -279,19 +284,21 @@ export default function Vacancies({ documents, fetchData }) {
               </div>
 
               {/* Upload CV Action */}
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold cursor-pointer shadow-sm transition-colors">
-                  <UploadCloud className="w-4 h-4" />
-                  {uploadingCV ? "Procesando..." : "Subir CV a esta Vacante"}
-                  <input
-                    type="file"
-                    accept=".pdf,.docx,.txt"
-                    onChange={handleUploadCVToVacancy}
-                    className="hidden"
-                    disabled={uploadingCV}
-                  />
-                </label>
-              </div>
+              {canOperate && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold cursor-pointer shadow-sm transition-colors">
+                    <UploadCloud className="w-4 h-4" />
+                    {uploadingCV ? "Procesando..." : "Subir CV a esta Vacante"}
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp"
+                      onChange={handleUploadCVToVacancy}
+                      className="hidden"
+                      disabled={uploadingCV}
+                    />
+                  </label>
+                </div>
+              )}
             </div>
 
             {/* Quick Skills list */}
@@ -305,33 +312,35 @@ export default function Vacancies({ documents, fetchData }) {
             </div>
 
             {/* Existing Documents Match Bar */}
-            <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 p-3 rounded-lg">
-              <div className="flex items-center gap-2 text-xs text-slate-600">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                <span>¿Tienes un CV ya cargado en el Repositorio? Pruébalo contra esta vacante:</span>
+            {canOperate && (
+              <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 p-3 rounded-lg">
+                <div className="flex items-center gap-2 text-xs text-slate-600">
+                  <Sparkles className="w-4 h-4 text-indigo-500" />
+                  <span>¿Tienes un CV ya cargado en el Repositorio? Pruébalo contra esta vacante:</span>
+                </div>
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <select
+                    value={selectedExistingDocId}
+                    onChange={(e) => setSelectedExistingDocId(e.target.value)}
+                    className="text-xs border border-slate-300 rounded-lg px-3 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Seleccionar CV existente...</option>
+                    {documents && documents.map(d => (
+                      <option key={d.id} value={d.id}>
+                        #{d.id} - {d.filename} ({d.category})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={handleMatchExistingDocument}
+                    disabled={!selectedExistingDocId || evaluatingDocId !== null}
+                    className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg font-medium transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    {evaluatingDocId === parseInt(selectedExistingDocId) ? "Evaluando..." : "Evaluar Match"}
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <select
-                  value={selectedExistingDocId}
-                  onChange={(e) => setSelectedExistingDocId(e.target.value)}
-                  className="text-xs border border-slate-300 rounded-lg px-3 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Seleccionar CV existente...</option>
-                  {documents && documents.map(d => (
-                    <option key={d.id} value={d.id}>
-                      #{d.id} - {d.filename} ({d.category})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onClick={handleMatchExistingDocument}
-                  disabled={!selectedExistingDocId || evaluatingDocId !== null}
-                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg font-medium transition-colors whitespace-nowrap cursor-pointer"
-                >
-                  {evaluatingDocId === parseInt(selectedExistingDocId) ? "Evaluando..." : "Evaluar Match"}
-                </button>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* LEADERBOARD DE CANDIDATOS */}
@@ -446,14 +455,16 @@ export default function Vacancies({ documents, fetchData }) {
                             >
                               <Eye className="w-3.5 h-3.5" /> Ver Ficha
                             </button>
-                            <button
-                              onClick={() => handleRematch(cand.id)}
-                              disabled={evaluatingDocId === cand.id}
-                              className="text-xs bg-slate-100 text-slate-700 hover:bg-slate-200 font-medium px-3 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                            >
-                              <RefreshCw className={`w-3.5 h-3.5 ${evaluatingDocId === cand.id ? 'animate-spin' : ''}`} />
-                              {evaluatingDocId === cand.id ? "Evaluando" : "Re-evaluar"}
-                            </button>
+                            {canOperate && (
+                              <button
+                                onClick={() => handleRematch(cand.id)}
+                                disabled={evaluatingDocId === cand.id}
+                                className="text-xs bg-slate-100 text-slate-700 hover:bg-slate-200 font-medium px-3 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                              >
+                                <RefreshCw className={`w-3.5 h-3.5 ${evaluatingDocId === cand.id ? 'animate-spin' : ''}`} />
+                                {evaluatingDocId === cand.id ? "Evaluando" : "Re-evaluar"}
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -524,12 +535,14 @@ export default function Vacancies({ documents, fetchData }) {
               <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto mb-6">
                 Crea tu primera vacante con sus requisitos y tecnologías para que el motor RAG de Gemini y pgvector califique automáticamente a los candidatos.
               </p>
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors cursor-pointer"
-              >
-                + Crear Primera Vacante
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => setIsModalOpen(true)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors cursor-pointer"
+                >
+                  + Crear Primera Vacante
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -551,15 +564,17 @@ export default function Vacancies({ documents, fetchData }) {
                         <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                           {vac.status}
                         </span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={(e) => handleDeleteVacancy(vac.id, e)}
-                            className="text-slate-400 hover:text-red-600 p-1 rounded transition-colors"
-                            title="Eliminar vacante"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                        {isAdmin && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => handleDeleteVacancy(vac.id, e)}
+                              className="text-slate-400 hover:text-red-600 p-1 rounded transition-colors cursor-pointer"
+                              title="Eliminar vacante"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       {/* Title & Dept */}

@@ -25,7 +25,16 @@ export default function Login({ onLoginSuccess }) {
       if (res.data.role) {
         sessionStorage.setItem('role', res.data.role);
       }
-      onLoginSuccess(res.data.access_token);
+      if (res.data.email) {
+        sessionStorage.setItem('user_email', res.data.email);
+      }
+      if (res.data.tenant_id) {
+        sessionStorage.setItem('tenant_id', String(res.data.tenant_id));
+      }
+      if (res.data.tenant_name) {
+        sessionStorage.setItem('tenant_name', res.data.tenant_name);
+      }
+      onLoginSuccess(res.data.access_token, res.data);
     } catch (err) {
       setLoginError('Usuario o contraseña incorrectos');
     }

@@ -29,6 +29,24 @@ api.interceptors.response.use(
 export const authAPI = {
   login: (credentials) => api.post('/auth/login', credentials),
   logout: () => api.post('/auth/logout'),
+  me: () => api.get('/auth/me'),
+};
+
+export const superadminAPI = {
+  getTenants: () => api.get('/superadmin/tenants'),
+  createTenant: (data) => api.post('/superadmin/tenants', data),
+  addUserToTenant: (tenantId, data) => api.post(`/superadmin/tenants/${tenantId}/users`, data),
+  deleteTenant: (tenantId) => api.delete(`/superadmin/tenants/${tenantId}`),
+};
+
+export const adminUsersAPI = {
+  getUsers: () => api.get('/admin/users'),
+  createUser: (data) => api.post('/admin/users', data),
+  updateRole: (userId, role) => api.patch(`/admin/users/${userId}/role`, { role }),
+  updatePassword: (userId, password) => api.patch(`/admin/users/${userId}/password`, { password }),
+  deleteUser: (userId) => api.delete(`/admin/users/${userId}`),
+  getEmailConfig: () => api.get('/admin/email-config'),
+  updateEmailConfig: (data) => api.put('/admin/email-config', data),
 };
 
 export const documentAPI = {

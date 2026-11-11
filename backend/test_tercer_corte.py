@@ -132,3 +132,71 @@ def test_07_plan_b_fallback_configuration():
     assert provider == "PlanB-LocalContingency"
     assert parsed["extracted_data"]["confidence_score"] < 80.0
 
+
+def test_08_multitenant_superadmin_and_company_admin_rbac():
+    """
+    Verifica:
+    1) El control de acceso RBAC de require_role para 'superadmin', 'admin', 'auditor' y 'user'.
+    2) El cifrado de contraseña del Superusuario (AdminEstebanM@gmail.com / zoan2006).
+    3) Que un 'auditor' o 'user' reciba HTTP 403 al intentar acceder a la consola de Superusuario o a la pestaña de Usuarios de Admin.
+    4) Validación estricta de campos: correo electrónico, longitud de contraseña (4 a 72 bytes) y sanitización anti-XSS en nombres de empresas/carpetas.
+    """
+    from fastapi import HTTPException
+    from app.auth import get_password_hash, verify_password, require_role
+    from app.models import User
+    from main import _validate_and_clean_email, _validate_password, _sanitize_entity_name
+
+    # 1. Verificar hash y validación de credenciales del Superusuario
+    super_hash = get_password_hash("zoan2006")
+    assert verify_password("zoan2006", super_hash) is True
+    assert verify_password("clave_incorrecta", super_hash) is False
+
+    super_user = User(id=1, email="AdminEstebanM@gmail.com", role="superadmin", tenant_id=1)
+    admin_user = User(id=2, email="indicio.admin@gmail.com", role="admin", tenant_id=1)
+    auditor_user = User(id=3, email="indicio.auditor@gmail.com", role="auditor", tenant_id=1)
+    normal_user = User(id=4, email="indicio.user@gmail.com", role="user", tenant_id=1)
+
+    check_superadmin = require_role(["superadmin"])
+    check_company_admin = require_role(["admin"])
+
+    # 2. Solo 'superadmin' puede acceder a la consola global Multi-Tenant
+    assert check_superadmin(current_user=super_user) == super_user
+    for unauthorized in (admin_user, auditor_user, normal_user):
+        with pytest.raises(HTTPException) as exc_info:
+            check_superadmin(current_user=unauthorized)
+        assert exc_info.value.status_code == 403
+
+    # 3. Solo 'admin' de la empresa puede acceder a la gestión de usuarios y auditores de su empresa
+    assert check_company_admin(current_user=admin_user) == admin_user
+    for unauthorized in (auditor_user, normal_user):
+        with pytest.raises(HTTPException) as exc_info:
+            check_company_admin(current_user=unauthorized)
+        assert exc_info.value.status_code == 403
+
+    # 4. Validaciones de campos y sanitización anti-XSS
+    assert _validate_and_clean_email("  AdminEstebanM@gmail.com ") == "AdminEstebanM@gmail.com"
+    for invalid_mail in ("correo_sin_arroba", "mal@", "@dominio.com", "<script>@evil.com"):
+        with pytest.raises(HTTPException) as exc_mail:
+            _validate_and_clean_email(invalid_mail)
+        assert exc_mail.value.status_code == 400
+
+    assert _validate_password("zoan2006") == "zoan2006"
+    for invalid_pwd in ("123", "x" * 80):
+        with pytest.raises(HTTPException) as exc_pwd:
+            _validate_password(invalid_pwd)
+        assert exc_pwd.value.status_code == 400
+
+    assert _sanitize_entity_name("  Constructora <Bolívar> S.A.S. ") == "Constructora Bolívar S.A.S."
+    with pytest.raises(HTTPException):
+        _sanitize_entity_name("A")
+
+    # 5. Verificar cifrado de Contraseña de Aplicación de Gmail por Empresa (Tenant)
+    enc_gmail = encrypt_sensitive_data({"app_password": "abcd efgh ijkl mnop".replace(" ", "")})
+    assert enc_gmail.startswith("ENC::")
+    dec_gmail = decrypt_sensitive_data(enc_gmail)
+    assert dec_gmail["app_password"] == "abcdefghijklmnop"
+
+
+
+
+

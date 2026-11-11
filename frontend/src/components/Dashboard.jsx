@@ -8,6 +8,9 @@ import { auditAPI, emailAPI } from '../services/api';
 import { groupItemsByMonthAndWeek } from '../utils/dateGrouping';
 
 export default function Dashboard({ stats }) {
+  const role = sessionStorage.getItem('role') || 'user';
+  const canViewAuditLogs = role === 'admin' || role === 'auditor';
+  const canSyncGmail = role === 'admin' || role === 'user';
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [syncingGmail, setSyncingGmail] = useState(false);
@@ -45,6 +48,7 @@ export default function Dashboard({ stats }) {
   };
 
   const fetchAuditLogs = async (filterVal = workflowFilter) => {
+    if (!canViewAuditLogs) return;
     setLoadingLogs(true);
     try {
       const params = { limit: 200 };
@@ -181,6 +185,9 @@ export default function Dashboard({ stats }) {
     }
     if (source.includes('AdminDelete')) {
       return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">🛡️ Ley1581</span>;
+    }
+    if (source.includes('AdminPanel') || source.includes('SuperAdmin')) {
+      return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">🔐 RBAC-IAM</span>;
     }
     return <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600">{source || 'Sistema'}</span>;
   };
@@ -412,22 +419,26 @@ export default function Dashboard({ stats }) {
               </button>
             </div>
 
-            <button
-              onClick={handleSyncGmailDashboard}
-              disabled={syncingGmail}
-              className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-100 disabled:opacity-60 transition-colors cursor-pointer"
-              title="Revisar bandeja de entrada de Gmail por IMAP ahora mismo"
-            >
-              {syncingGmail ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
-              {syncingGmail ? 'Sincronizando...' : '📥 Sincronizar Gmail'}
-            </button>
-            <button
-              onClick={() => fetchAuditLogs()}
-              className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-indigo-100 transition-colors cursor-pointer"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingLogs ? 'animate-spin' : ''}`} />
-              Actualizar
-            </button>
+            {canSyncGmail && (
+              <button
+                onClick={handleSyncGmailDashboard}
+                disabled={syncingGmail}
+                className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-100 disabled:opacity-60 transition-colors cursor-pointer"
+                title="Revisar bandeja de entrada de Gmail por IMAP ahora mismo"
+              >
+                {syncingGmail ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
+                {syncingGmail ? 'Sincronizando...' : '📥 Sincronizar Gmail'}
+              </button>
+            )}
+            {canViewAuditLogs && (
+              <button
+                onClick={() => fetchAuditLogs()}
+                className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-indigo-100 transition-colors cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingLogs ? 'animate-spin' : ''}`} />
+                Actualizar
+              </button>
+            )}
           </div>
         </div>
 
@@ -460,6 +471,8 @@ export default function Dashboard({ stats }) {
               <option value="HeadhunterRRHH-Python">🌟 Headhunter & Scouting RRHH</option>
               <option value="IngestaCorreo-IMAP">📥 Ingesta de Correo (IMAP)</option>
               <option value="HabeasData-SupresionLey1581">🛡️ Supresión Habeas Data (Ley 1581)</option>
+              <option value="IAM-GestionUsuarios">👥 Gestión de Usuarios y Roles (RBAC)</option>
+              <option value="SaaS-MultiTenant">🏢 Alta de Empresa Multi-Tenant (SaaS)</option>
             </select>
           </div>
 
@@ -503,7 +516,14 @@ export default function Dashboard({ stats }) {
         )}
 
         {/* CONTENIDO PRINCIPAL: VISTA AGRUPADA POR MES -> SEMANA O LISTA CONTINUA */}
-        {filteredLogs.length === 0 ? (
+        {!canViewAuditLogs ? (
+          <div className="p-8 text-center bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+            <p className="text-sm font-bold text-slate-700">🔒 Historial de Auditoría Restringido (Ley 1581 de 2012)</p>
+            <p className="text-xs text-slate-500">
+              Por seguridad y protección de datos personales, la bitácora detallada de ejecuciones (<code>workflow_audit_logs</code>) solo es visible para los roles <strong>Administrador (admin)</strong> y <strong>Auditor (auditor)</strong>.
+            </p>
+          </div>
+        ) : filteredLogs.length === 0 ? (
           <div className="p-10 text-center text-slate-400 italic border border-dashed border-slate-200 rounded-xl">
             No se encontraron registros de auditoría para los filtros seleccionados.
           </div>

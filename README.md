@@ -19,7 +19,11 @@
 
 3. **Seguridad y Protección de Datos Personales — Ley 1581 de 2012 ([`crypto.py`](backend/app/crypto.py) y [`auth.py`](backend/app/auth.py)):**
    - **Datos en Reposo:** Cifrado simétrico autenticado `AES-128-CBC + HMAC-SHA256 (Fernet)` respaldado por llaves `RSA-2048` en PostgreSQL (`_encrypted_data`), enmascaramiento de PII y particionamiento físico por organización (`storage/tenant_{id}/`).
-   - **Usuarios y Accesos:** Contraseñas con hash `bcrypt`, sesiones `JWT (HS256)` con revocación en `BlacklistedToken` y control de roles (`admin`, `auditor`, `user`).
+   - **Usuarios, Roles y Multi-Tenant SaaS:** Contraseñas con hash `bcrypt`, sesiones `JWT (HS256)` con revocación en `BlacklistedToken` y jerarquía de 4 niveles:
+     - **`superadmin` (`AdminEstebanM@gmail.com`):** Consola Global SaaS para dar de alta nuevas empresas (`Tenant`), crear su bóveda aislada (`storage/tenant_N/`) y su Administrador inicial.
+     - **`admin` (Administrador de Empresa):** Pestaña exclusiva **"Usuarios y Roles"** para crear `user` y `auditor` en su empresa y enlazar el correo **Gmail corporativo** directamente con su repositorio (`storage/tenant_N/`).
+     - **`auditor` (Auditor Ley 1581):** Inspección de trazabilidad (`WorkflowAuditLog`) y revisión documental en solo lectura.
+     - **`user` (Operador):** Subida de archivos/facturas, validación humana y consultas al Asistente IA.
    - **Trazabilidad y Habeas Data:** Registro inmutable en `workflow_audit_logs` organizado cronológicamente por **Mes y Semana activa** en el Dashboard, incluyendo actas de supresión permanente de datos.
 
 ---
@@ -45,15 +49,16 @@ cd frontend
 npm run dev
 ```
 Accede en `http://localhost:5173`:
-- **Admin:** `indicio.admin@gmail.com` / `admin123`
+- **Superusuario Global SaaS (Crea Empresas y sus Admins):** `AdminEstebanM@gmail.com` / `zoan2006`
+- **Admin Empresa Principal:** `indicio.admin@gmail.com` / `admin123`
 - **Auditor:** `indicio.auditor@gmail.com` / `auditor123`
-- **Usuario:** `indicio.user@gmail.com` / `user123`
+- **Usuario / Operador:** `indicio.user@gmail.com` / `user123`
 
 ---
 
 ## 🧪 Pruebas Automatizadas (`Pytest`) y Batería de 20 Imágenes
 
-Ejecutar la suite de 7 pruebas unitarias y de integración:
+Ejecutar la suite de 8 pruebas unitarias y de integración:
 ```bash
 .\backend\venv\Scripts\pytest.exe backend\test_tercer_corte.py -v
 ```

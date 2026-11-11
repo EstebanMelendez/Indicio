@@ -10,6 +10,9 @@ import { groupItemsByMonthAndWeek } from '../utils/dateGrouping';
 import DocumentViewer from './DocumentViewer';
 
 export default function Repository({ folders, documents, fetchData }) {
+  const role = sessionStorage.getItem('role') || 'user';
+  const isAdmin = role === 'admin';
+  const canOperate = role === 'admin' || role === 'user';
   const [currentFolder, setCurrentFolder] = useState(null);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -454,15 +457,17 @@ export default function Repository({ folders, documents, fetchData }) {
         <table className="w-full text-left">
           <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-xs uppercase font-bold tracking-wider">
             <tr>
-              <th className="p-3.5 w-10 text-center">
-                <input
-                  type="checkbox"
-                  checked={allInSubsetSelected}
-                  onChange={() => toggleSelectGroup(docsSubset)}
-                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                  title="Seleccionar todos los documentos de esta sección"
-                />
-              </th>
+              {isAdmin && (
+                <th className="p-3.5 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allInSubsetSelected}
+                    onChange={() => toggleSelectGroup(docsSubset)}
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    title="Seleccionar todos los documentos de esta sección"
+                  />
+                </th>
+              )}
               <th className="p-3.5">Documento / Fecha & Autor</th>
               <th className="p-3.5">Categoría</th>
               <th className="p-3.5">Resumen Clave / Valor IA</th>
@@ -490,20 +495,22 @@ export default function Repository({ folders, documents, fetchData }) {
                     isSelected ? 'bg-indigo-50/60' : 'hover:bg-slate-50/90'
                   }`}
                 >
-                  <td
-                    className="p-3.5 text-center"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleSelectDoc(doc.id);
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => {}}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                    />
-                  </td>
+                  {isAdmin && (
+                    <td
+                      className="p-3.5 text-center"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelectDoc(doc.id);
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {}}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      />
+                    </td>
+                  )}
 
                   <td className="p-3.5 font-medium text-slate-800">
                     <div className="flex items-center gap-3">
@@ -587,13 +594,15 @@ export default function Repository({ folders, documents, fetchData }) {
                       >
                         <Eye className="w-4 h-4" />
                       </button>
-                      <button
-                        onClick={() => handleDelete(doc.id)}
-                        className="text-rose-500 hover:text-rose-700 transition-colors p-2 rounded-lg hover:bg-rose-50 cursor-pointer"
-                        title="Eliminar"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDelete(doc.id)}
+                          className="text-rose-500 hover:text-rose-700 transition-colors p-2 rounded-lg hover:bg-rose-50 cursor-pointer"
+                          title="Eliminar (Supresión Ley 1581)"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -665,53 +674,61 @@ export default function Repository({ folders, documents, fetchData }) {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button
-            onClick={handleSyncGmail}
-            disabled={syncingGmail}
-            className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl hover:bg-emerald-700 disabled:opacity-60 flex items-center shadow-sm transition-colors font-semibold text-sm cursor-pointer"
-            title="Buscar ahora mismo correos con facturas o CVs adjuntos en Gmail (IMAP)"
-          >
-            {syncingGmail ? (
-              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-            ) : (
-              <Mail className="w-4 h-4 mr-2" />
-            )}
-            {syncingGmail ? 'Sincronizando Gmail...' : '📥 Sincronizar Gmail'}
-          </button>
-          {!currentFolder && (
-            <button
-              onClick={handleCreateFolder}
-              className="bg-white border border-slate-200 text-slate-700 px-4 py-2.5 rounded-xl hover:bg-slate-50 flex items-center shadow-xs transition-colors font-semibold text-sm cursor-pointer"
-            >
-              <FolderPlus className="w-4 h-4 mr-2 text-slate-500" /> Nueva Carpeta
-            </button>
+          {canOperate ? (
+            <>
+              <button
+                onClick={handleSyncGmail}
+                disabled={syncingGmail}
+                className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl hover:bg-emerald-700 disabled:opacity-60 flex items-center shadow-sm transition-colors font-semibold text-sm cursor-pointer"
+                title="Buscar ahora mismo correos con facturas o CVs adjuntos en el Gmail enlazado a tu empresa (IMAP)"
+              >
+                {syncingGmail ? (
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <Mail className="w-4 h-4 mr-2" />
+                )}
+                {syncingGmail ? 'Sincronizando Gmail...' : '📥 Sincronizar Gmail'}
+              </button>
+              {!currentFolder && isAdmin && (
+                <button
+                  onClick={handleCreateFolder}
+                  className="bg-white border border-slate-200 text-slate-700 px-4 py-2.5 rounded-xl hover:bg-slate-50 flex items-center shadow-xs transition-colors font-semibold text-sm cursor-pointer"
+                >
+                  <FolderPlus className="w-4 h-4 mr-2 text-slate-500" /> Nueva Carpeta
+                </button>
+              )}
+              <label
+                className="bg-indigo-600 text-white px-4 py-2.5 rounded-xl cursor-pointer hover:bg-indigo-700 flex items-center shadow-sm transition-colors font-semibold text-sm"
+                title="Usar cámara del celular o subir foto de factura"
+              >
+                <Camera className="w-4 h-4 mr-2" />
+                {uploading ? 'Analizando...' : '📸 Capturar Factura'}
+                <input
+                  type="file"
+                  className="hidden"
+                  accept="image/*,.jpg,.jpeg,.png,.webp"
+                  capture="environment"
+                  onChange={handleFileUpload}
+                  disabled={uploading}
+                />
+              </label>
+              <label className="bg-blue-600 text-white px-4 py-2.5 rounded-xl cursor-pointer hover:bg-blue-700 flex items-center shadow-sm transition-colors font-semibold text-sm">
+                <UploadCloud className="w-4 h-4 mr-2" />
+                {uploading ? 'Procesando...' : 'Cargar Archivo / Foto'}
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp,image/*"
+                  onChange={handleFileUpload}
+                  disabled={uploading}
+                />
+              </label>
+            </>
+          ) : (
+            <span className="px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold flex items-center gap-1.5">
+              👁️ Modo Auditoría Ley 1581 (Solo Lectura)
+            </span>
           )}
-          <label
-            className="bg-indigo-600 text-white px-4 py-2.5 rounded-xl cursor-pointer hover:bg-indigo-700 flex items-center shadow-sm transition-colors font-semibold text-sm"
-            title="Usar cámara del celular o subir foto de factura"
-          >
-            <Camera className="w-4 h-4 mr-2" />
-            {uploading ? 'Analizando...' : '📸 Capturar Factura'}
-            <input
-              type="file"
-              className="hidden"
-              accept="image/*,.jpg,.jpeg,.png,.webp"
-              capture="environment"
-              onChange={handleFileUpload}
-              disabled={uploading}
-            />
-          </label>
-          <label className="bg-blue-600 text-white px-4 py-2.5 rounded-xl cursor-pointer hover:bg-blue-700 flex items-center shadow-sm transition-colors font-semibold text-sm">
-            <UploadCloud className="w-4 h-4 mr-2" />
-            {uploading ? 'Procesando...' : 'Cargar Archivo / Foto'}
-            <input
-              type="file"
-              className="hidden"
-              accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp,image/*"
-              onChange={handleFileUpload}
-              disabled={uploading}
-            />
-          </label>
         </div>
       </div>
 
@@ -806,16 +823,18 @@ export default function Repository({ folders, documents, fetchData }) {
                       )}
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteFolder(folder.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-all cursor-pointer"
-                    title="Eliminar carpeta"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  {isAdmin && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteFolder(folder.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-all cursor-pointer"
+                      title="Eliminar carpeta"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -951,8 +970,8 @@ export default function Repository({ folders, documents, fetchData }) {
         </div>
       </div>
 
-      {/* BARRA DE ACCIONES EN LOTE CUANDO HAY ARCHIVOS SELECCIONADOS */}
-      {selectedIds.length > 0 && (
+      {/* BARRA DE ACCIONES EN LOTE CUANDO HAY ARCHIVOS SELECCIONADOS (SOLO ADMIN) */}
+      {isAdmin && selectedIds.length > 0 && (
         <div className="bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-200">
           <div className="flex items-center gap-2 text-xs font-bold">
             <CheckSquare className="w-4 h-4 text-indigo-400" />

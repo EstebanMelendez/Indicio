@@ -31,9 +31,11 @@ Sigue estos pasos en orden para levantar todo el proyecto en local:
    > npm run dev
    (Disponible en http://localhost:5173).
 
-4. CREDENCIALES DE ACCESO POR ROLES (RBAC)
+4. CREDENCIALES DE ACCESO POR ROLES (MULTI-TENANT Y RBAC)
    ---------------------------------
-   - Administrador (Control total):
+   - Superusuario Global SaaS (Crea nuevas empresas / Tenants y sus Admins):
+     Email: AdminEstebanM@gmail.com   |   Pass: zoan2006
+   - Administrador de Empresa Principal (Control total + Pestaña "Usuarios y Roles"):
      Email: indicio.admin@gmail.com   |   Pass: admin123
    - Auditor (Solo lectura y trazabilidad Ley 1581):
      Email: indicio.auditor@gmail.com |   Pass: auditor123
