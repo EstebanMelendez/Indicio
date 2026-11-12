@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   Users, UserPlus, Shield, Eye, Trash2, KeyRound, Building2,
-  CheckCircle2, AlertCircle, Search, RefreshCw, Mail, Link2, FolderLock
+  CheckCircle2, AlertCircle, Search, RefreshCw, Mail, Link2, FolderLock, Bot
 } from 'lucide-react';
 import { adminUsersAPI, emailAPI } from '../services/api';
 
@@ -21,6 +21,14 @@ export default function CompanyUsers() {
   const [savingEmailConfig, setSavingEmailConfig] = useState(false);
   const [syncingGmailNow, setSyncingGmailNow] = useState(false);
 
+  // Estado del enlace de Bot de Telegram propio de la Empresa
+  const [telegramBotToken, setTelegramBotToken] = useState('');
+  const [telegramBotUsername, setTelegramBotUsername] = useState('');
+  const [hasTelegramBot, setHasTelegramBot] = useState(false);
+  const [telegramTokenMasked, setTelegramTokenMasked] = useState(null);
+  const [verifyTelegramConnection, setVerifyTelegramConnection] = useState(true);
+  const [savingTelegramConfig, setSavingTelegramConfig] = useState(false);
+
   // Formulario para crear usuario o auditor
   const [newEmail, setNewEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -37,9 +45,10 @@ export default function CompanyUsers() {
   const fetchCompanyData = async () => {
     setLoading(true);
     try {
-      const [usersRes, emailCfgRes] = await Promise.all([
+      const [usersRes, emailCfgRes, tgCfgRes] = await Promise.all([
         adminUsersAPI.getUsers(),
-        adminUsersAPI.getEmailConfig().catch(() => null)
+        adminUsersAPI.getEmailConfig().catch(() => null),
+        adminUsersAPI.getTelegramConfig().catch(() => null)
       ]);
       setUsers(usersRes.data.users || []);
       if (usersRes.data.tenant_name) {
@@ -56,6 +65,11 @@ export default function CompanyUsers() {
         if (emailCfgRes.data.storage_path) {
           setStoragePath(emailCfgRes.data.storage_path);
         }
+      }
+      if (tgCfgRes?.data) {
+        setTelegramBotUsername(tgCfgRes.data.bot_username || '');
+        setHasTelegramBot(Boolean(tgCfgRes.data.has_bot_token));
+        setTelegramTokenMasked(tgCfgRes.data.bot_token_masked || null);
       }
     } catch (err) {
       setFeedback({
@@ -95,6 +109,33 @@ export default function CompanyUsers() {
       });
     } finally {
       setSavingEmailConfig(false);
+    }
+  };
+
+  const handleSaveTelegramConfig = async (e) => {
+    e.preventDefault();
+    setFeedback(null);
+    setSavingTelegramConfig(true);
+    try {
+      const res = await adminUsersAPI.updateTelegramConfig({
+        bot_token: telegramBotToken.trim(),
+        bot_username: telegramBotUsername.trim() || null,
+        verify_connection: verifyTelegramConnection
+      });
+      setFeedback({ type: 'success', message: res.data.message });
+      setTelegramBotToken('');
+      if (res.data.config) {
+        setTelegramBotUsername(res.data.config.bot_username || '');
+        setHasTelegramBot(Boolean(res.data.config.has_bot_token));
+        setTelegramTokenMasked(res.data.config.bot_token_masked || null);
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: err.response?.data?.detail || 'No se pudo enlazar el Bot de Telegram con el repositorio.'
+      });
+    } finally {
+      setSavingTelegramConfig(false);
     }
   };
 
@@ -224,9 +265,9 @@ export default function CompanyUsers() {
               RBAC · Ley 1581 de 2012
             </span>
           </div>
-          <h2 className="text-2xl font-black text-slate-800 mt-2">Administración de Empresa: Usuarios, Roles y Correo Gmail</h2>
+          <h2 className="text-2xl font-black text-slate-800 mt-2">Administración de Empresa: Usuarios, Roles, Gmail y Bot Telegram</h2>
           <p className="text-sm text-slate-500">
-            Enlaza el correo Gmail de tu empresa con su repositorio aislado (<code>{storagePath}</code>) y gestiona las cuentas de <strong>Operadores (user)</strong> y <strong>Auditores (auditor)</strong>.
+            Enlaza el correo Gmail y el Bot de Telegram propios de tu empresa con su repositorio aislado (<code>{storagePath}</code>) y gestiona las cuentas de <strong>Operadores (user)</strong> y <strong>Auditores (auditor)</strong>.
           </p>
         </div>
 
@@ -348,6 +389,91 @@ export default function CompanyUsers() {
                 Sincronizar
               </button>
             </div>
+          </div>
+        </form>
+      </div>
+
+      {/* SECCIÓN NUEVA: ENLACE DE BOT DE TELEGRAM EXCLUSIVO POR EMPRESA */}
+      <div className="bg-white border border-sky-200/80 rounded-2xl p-6 shadow-sm space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-sky-600 text-white">
+              <Bot className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                Enlace de Bot de Telegram Exclusivo para {tenantName}
+              </h3>
+              <p className="text-xs text-slate-500 flex items-center gap-1.5 mt-0.5">
+                <FolderLock className="w-3.5 h-3.5 text-sky-600" />
+                Las fotos de facturas y consultas RAG enviadas a este Bot operan únicamente sobre <code>{storagePath}</code>.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {hasTelegramBot ? (
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Bot Enlazado {telegramBotUsername ? `(${telegramBotUsername})` : ''}
+              </span>
+            ) : (
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                Sin Bot de Telegram enlazado
+              </span>
+            )}
+          </div>
+        </div>
+
+        <form onSubmit={handleSaveTelegramConfig} className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end pt-1">
+          <div className="md:col-span-6">
+            <label className="block text-xs font-bold uppercase text-slate-600 mb-1">
+              Token del Bot de Telegram (@BotFather)
+              {telegramTokenMasked && (
+                <span className="ml-2 text-[11px] font-normal text-emerald-600">
+                  Actual: <code>{telegramTokenMasked}</code>
+                </span>
+              )}
+            </label>
+            <input
+              type="password"
+              placeholder={hasTelegramBot ? 'Pegar nuevo Token de @BotFather para cambiar (o dejar vacío para desvincular)' : 'Ej: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz'}
+              value={telegramBotToken}
+              onChange={(e) => setTelegramBotToken(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+            />
+          </div>
+
+          <div className="md:col-span-3">
+            <label className="block text-xs font-bold uppercase text-slate-600 mb-1">
+              Usuario del Bot (Se detecta solo)
+            </label>
+            <input
+              type="text"
+              placeholder="Ej: @MiEmpresaBot"
+              value={telegramBotUsername}
+              onChange={(e) => setTelegramBotUsername(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+            />
+          </div>
+
+          <div className="md:col-span-3 flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={verifyTelegramConnection}
+                onChange={(e) => setVerifyTelegramConnection(e.target.checked)}
+                className="rounded text-sky-600"
+              />
+              <span>Verificar con Telegram API (getMe)</span>
+            </label>
+            <button
+              type="submit"
+              disabled={savingTelegramConfig}
+              className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold py-2.5 px-3 rounded-xl shadow transition flex items-center justify-center gap-1.5 text-xs cursor-pointer"
+            >
+              <Link2 className="w-4 h-4" />
+              {savingTelegramConfig ? 'Verificando...' : 'Enlazar Bot Telegram'}
+            </button>
           </div>
         </form>
       </div>

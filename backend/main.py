@@ -23,6 +23,7 @@ from app.auth import get_current_user, create_access_token, verify_password, get
 from app.crypto import encrypt_sensitive_data, decrypt_sensitive_data, mask_secret, sanitize_error_log, build_protected_extracted_data
 from app.notifications import notify_document_status
 from app.email_service import verify_email_action_token, check_gmail_inbox_once, get_tenant_gmail_config, verify_gmail_imap_credentials
+from telegram_bot_service import get_tenant_telegram_config, verify_telegram_bot_token
 from app.fallback_service import call_groq_text
 import google.generativeai as genai
 import pdfplumber
@@ -87,6 +88,8 @@ def startup_db_check():
             conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);"))
             conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gmail_user VARCHAR(255);"))
             conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gmail_app_password_enc TEXT;"))
+            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_bot_token_enc TEXT;"))
+            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_bot_username VARCHAR(255);"))
             conn.commit()
         # Garantizar Tenant 1, usuarios semilla (admin, auditor, user, service) y protección Ley 1581
         from sqlalchemy.orm.attributes import flag_modified
@@ -95,12 +98,16 @@ def startup_db_check():
             tenant = db_init.query(Tenant).filter(Tenant.id == 1).first()
             env_gmail = os.getenv("GMAIL_USER", "indicio.admin@gmail.com").strip()
             env_gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip().replace(" ", "")
+            env_tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            env_tg_user = os.getenv("TELEGRAM_BOT_USERNAME", "@Indicion8n_bot").strip()
             if not tenant:
                 tenant = Tenant(
                     id=1,
                     name="Organización Principal",
                     gmail_user=env_gmail or None,
-                    gmail_app_password_enc=encrypt_sensitive_data({"app_password": env_gmail_pass}) if env_gmail_pass else None
+                    gmail_app_password_enc=encrypt_sensitive_data({"app_password": env_gmail_pass}) if env_gmail_pass else None,
+                    telegram_bot_token_enc=encrypt_sensitive_data({"bot_token": env_tg_token}) if env_tg_token else None,
+                    telegram_bot_username=env_tg_user if env_tg_token else None
                 )
                 db_init.add(tenant)
                 db_init.commit()
@@ -113,11 +120,16 @@ def startup_db_check():
                 if not tenant.gmail_app_password_enc and env_gmail_pass:
                     tenant.gmail_app_password_enc = encrypt_sensitive_data({"app_password": env_gmail_pass})
                     updated_t1 = True
+                if not tenant.telegram_bot_token_enc and env_tg_token:
+                    tenant.telegram_bot_token_enc = encrypt_sensitive_data({"bot_token": env_tg_token})
+                    if not tenant.telegram_bot_username:
+                        tenant.telegram_bot_username = env_tg_user
+                    updated_t1 = True
                 if updated_t1:
                     db_init.commit()
 
             seed_users = [
-                {"email": "AdminEstebanM@gmail.com", "pwd": os.getenv("SUPERADMIN_PASSWORD", "zoan2006"), "role": "superadmin"},
+                {"email": "AdminEstebanM@gmail.com", "pwd": os.getenv("SUPERADMIN_PASSWORD", "superadmin123"), "role": "superadmin"},
                 {"email": "indicio.admin@gmail.com", "pwd": os.getenv("ADMIN_PASSWORD", "admin123"), "role": "admin"},
                 {"email": "indicio.auditor@gmail.com", "pwd": os.getenv("AUDITOR_PASSWORD", "auditor123"), "role": "auditor"},
                 {"email": "indicio.user@gmail.com", "pwd": os.getenv("USER_PASSWORD", "user123"), "role": "user"},
@@ -172,19 +184,18 @@ def startup_db_check():
         finally:
             db_init.close()
         logger.info("[SEGURIDAD] Verificación y migración de esquema completada exitosamente.")
-        # Iniciar hilos en segundo plano: Ingesta de Gmail (IMAP) + Bot de Telegram
+        # Iniciar hilos en segundo plano: Ingesta de Gmail (IMAP) + Orquestador Multi-Tenant de Bots de Telegram
         import threading
         def _imap_worker():
             while True:
                 time.sleep(60)
-                if os.getenv("GMAIL_APP_PASSWORD", "").strip():
-                    try:
-                        check_gmail_inbox_once(lambda: next(get_db()), process_document_background)
-                    except Exception:
-                        pass
+                try:
+                    check_gmail_inbox_once(lambda: next(get_db()), process_document_background)
+                except Exception:
+                    pass
         threading.Thread(target=_imap_worker, daemon=True).start()
 
-        if os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and os.getenv("DISABLE_TELEGRAM_BOT", "false").lower() != "true":
+        if os.getenv("DISABLE_TELEGRAM_BOT", "false").lower() != "true":
             def _telegram_worker():
                 time.sleep(4)
                 try:
@@ -320,6 +331,7 @@ class CreateTenantWithAdminRequest(BaseModel):
     admin_password: str
     gmail_user: Optional[str] = None
     gmail_app_password: Optional[str] = None
+    telegram_bot_token: Optional[str] = None
     create_default_vacancy: bool = True
 
 class CreateTenantAdminRequest(BaseModel):
@@ -348,6 +360,7 @@ def list_all_tenants(
         folders_count = db.query(Folder).filter(Folder.tenant_id == t.id).count()
         vacancies_count = db.query(Vacancy).filter(Vacancy.tenant_id == t.id).count()
         gmail_cfg = get_tenant_gmail_config(db, t.id)
+        tg_cfg = get_tenant_telegram_config(db, t.id)
         result.append({
             "id": t.id,
             "name": t.name,
@@ -355,6 +368,8 @@ def list_all_tenants(
             "storage_path": f"storage/tenant_{t.id}/",
             "gmail_user": gmail_cfg["gmail_user"] or None,
             "gmail_linked": gmail_cfg["has_imap_credentials"],
+            "telegram_bot_username": tg_cfg["bot_username"] or None,
+            "telegram_linked": tg_cfg["has_bot_token"],
             "users_count": len(t_users),
             "documents_count": docs_count,
             "folders_count": folders_count,
@@ -395,14 +410,38 @@ def create_tenant_with_admin(
     clean_gmail_enc = None
     if payload.gmail_user and payload.gmail_user.strip():
         clean_gmail_user = _validate_and_clean_email(payload.gmail_user)
+        for ot in db.query(Tenant).all():
+            ot_g = get_tenant_gmail_config(db, ot.id)
+            if ot_g.get("gmail_user") and ot_g["gmail_user"].lower() == clean_gmail_user.lower():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"El correo Gmail '{clean_gmail_user}' ya está enlazado a la empresa '{ot.name}'. Cada empresa debe enlazar su propio correo independiente."
+                )
     if payload.gmail_app_password and payload.gmail_app_password.strip():
         raw_app_pwd = payload.gmail_app_password.strip().replace(" ", "")
         clean_gmail_enc = encrypt_sensitive_data({"app_password": raw_app_pwd})
 
+    clean_tg_enc = None
+    clean_tg_user = None
+    if payload.telegram_bot_token and payload.telegram_bot_token.strip():
+        raw_tg_tok = payload.telegram_bot_token.strip()
+        if ":" not in raw_tg_tok or len(raw_tg_tok) < 20 or len(raw_tg_tok) > 120:
+            raise HTTPException(status_code=400, detail="Formato de Token de Bot de Telegram inválido.")
+        for ot in db.query(Tenant).all():
+            ot_tg = get_tenant_telegram_config(db, ot.id)
+            if ot_tg.get("bot_token") and ot_tg["bot_token"] == raw_tg_tok:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Este Token de Bot de Telegram ya está enlazado a la empresa '{ot.name}'."
+                )
+        clean_tg_enc = encrypt_sensitive_data({"bot_token": raw_tg_tok})
+
     new_tenant = Tenant(
         name=tenant_name,
         gmail_user=clean_gmail_user,
-        gmail_app_password_enc=clean_gmail_enc
+        gmail_app_password_enc=clean_gmail_enc,
+        telegram_bot_token_enc=clean_tg_enc,
+        telegram_bot_username=clean_tg_user
     )
     db.add(new_tenant)
     db.commit()
@@ -579,6 +618,16 @@ def update_company_email_config(
     clean_gmail = _validate_and_clean_email(payload.gmail_user)
     raw_app_pwd = (payload.gmail_app_password or "").strip().replace(" ", "")
 
+    # Verificar que ninguna otra empresa esté usando ya este mismo correo Gmail (aislamiento estricto Multi-Tenant)
+    other_tenants = db.query(Tenant).filter(Tenant.id != current_user.tenant_id).all()
+    for ot in other_tenants:
+        ot_cfg = get_tenant_gmail_config(db, ot.id)
+        if ot_cfg.get("gmail_user") and ot_cfg["gmail_user"].lower() == clean_gmail.lower():
+            raise HTTPException(
+                status_code=409,
+                detail=f"El correo Gmail '{clean_gmail}' ya está enlazado a otra empresa ('{ot.name}'). Cada organización debe usar su propio correo independiente."
+            )
+
     # Si no envió una nueva contraseña de aplicación, conservar la que ya tenía la empresa
     existing_cfg = get_tenant_gmail_config(db, current_user.tenant_id)
     effective_app_pwd = raw_app_pwd if raw_app_pwd else existing_cfg["gmail_app_password"]
@@ -632,6 +681,125 @@ def update_company_email_config(
             "gmail_user": updated_cfg["gmail_user"],
             "has_imap_credentials": updated_cfg["has_imap_credentials"],
             "app_password_masked": updated_cfg["app_password_masked"]
+        }
+    }
+
+class UpdateTenantTelegramConfigRequest(BaseModel):
+    bot_token: Optional[str] = None
+    bot_username: Optional[str] = None
+    verify_connection: bool = True
+
+@app.get("/api/admin/telegram-config")
+def get_company_telegram_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """Retorna la configuración del Bot de Telegram enlazado al repositorio de la empresa actual."""
+    cfg = get_tenant_telegram_config(db, current_user.tenant_id)
+    return {
+        "tenant_id": cfg["tenant_id"],
+        "tenant_name": cfg["tenant_name"],
+        "storage_path": f"{cfg['storage_path']}/",
+        "bot_username": cfg["bot_username"],
+        "has_bot_token": cfg["has_bot_token"],
+        "bot_token_masked": cfg["bot_token_masked"]
+    }
+
+@app.put("/api/admin/telegram-config")
+def update_company_telegram_config(
+    payload: UpdateTenantTelegramConfigRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"]))
+):
+    """
+    Exclusivo para el Administrador de cada empresa (rol 'admin'):
+    Permite enlazar el Token de Bot de Telegram propio de la empresa (@BotFather),
+    cifrado en reposo bajo Ley 1581 (ENC::), con el repositorio aislado (storage/tenant_{id}/).
+    Garantiza además que dos empresas distintas no puedan compartir el mismo token de bot.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada.")
+
+    raw_token = (payload.bot_token or "").strip()
+    raw_username = (payload.bot_username or "").strip()
+
+    # Si envía el token vacío y pide desvincular
+    if not raw_token:
+        tenant.telegram_bot_token_enc = None
+        tenant.telegram_bot_username = None
+        db.commit()
+        return {
+            "message": f"Bot de Telegram desvinculado de '{tenant.name}'.",
+            "config": {
+                "tenant_id": tenant.id,
+                "tenant_name": tenant.name,
+                "storage_path": f"storage/tenant_{tenant.id}/",
+                "bot_username": None,
+                "has_bot_token": False,
+                "bot_token_masked": ""
+            }
+        }
+
+    if ":" not in raw_token or len(raw_token) < 20 or len(raw_token) > 120:
+        raise HTTPException(
+            status_code=400,
+            detail="Formato de Token de Telegram inválido. Copie el token completo entregado por @BotFather (ej. 123456789:ABCdef...)."
+        )
+
+    # Verificar que ninguna otra empresa esté usando ya este mismo token (aislamiento estricto Multi-Tenant)
+    other_tenants = db.query(Tenant).filter(Tenant.id != current_user.tenant_id).all()
+    for ot in other_tenants:
+        ot_cfg = get_tenant_telegram_config(db, ot.id)
+        if ot_cfg.get("bot_token") and ot_cfg["bot_token"] == raw_token:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Este Token de Bot de Telegram ya está enlazado a otra empresa ('{ot.name}'). Cada organización debe usar su propio Bot independiente."
+            )
+
+    detected_username = raw_username
+    if payload.verify_connection:
+        tg_check = verify_telegram_bot_token(raw_token)
+        if not tg_check["valid"]:
+            raise HTTPException(status_code=400, detail=tg_check["reason"])
+        if tg_check.get("username"):
+            detected_username = tg_check["username"]
+
+    if detected_username and not detected_username.startswith("@"):
+        detected_username = f"@{detected_username}"
+
+    tenant.telegram_bot_token_enc = encrypt_sensitive_data({"bot_token": raw_token})
+    tenant.telegram_bot_username = detected_username or tenant.telegram_bot_username
+
+    db.add(WorkflowAuditLog(
+        tenant_id=current_user.tenant_id,
+        workflow_name="IAM-GestionUsuarios",
+        trigger_source="AdminPanel",
+        user_email=current_user.email,
+        ai_provider="Telegram-Repository-Link",
+        input_summary=f"Enlace de Bot de Telegram '{tenant.telegram_bot_username or 'Bot Corporativo'}' con repositorio storage/tenant_{current_user.tenant_id}/",
+        output_result={
+            "action": "LINK_TENANT_TELEGRAM_BOT",
+            "tenant_id": current_user.tenant_id,
+            "bot_username": tenant.telegram_bot_username,
+            "storage_path": f"storage/tenant_{current_user.tenant_id}/"
+        },
+        confidence_score=100,
+        status="SUCCESS",
+        execution_time_ms=15
+    ))
+    db.commit()
+
+    updated_cfg = get_tenant_telegram_config(db, current_user.tenant_id)
+    return {
+        "message": f"Bot de Telegram {updated_cfg['bot_username'] or ''} enlazado exitosamente al repositorio de '{tenant.name}' (storage/tenant_{tenant.id}/).",
+        "config": {
+            "tenant_id": updated_cfg["tenant_id"],
+            "tenant_name": updated_cfg["tenant_name"],
+            "storage_path": f"{updated_cfg['storage_path']}/",
+            "bot_username": updated_cfg["bot_username"],
+            "has_bot_token": updated_cfg["has_bot_token"],
+            "bot_token_masked": updated_cfg["bot_token_masked"]
         }
     }
 

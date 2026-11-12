@@ -42,6 +42,6 @@ def notify_document_status(document: Document, db: Optional[Session] = None) -> 
     # 2. Notificación general por correo (para documentos que no sean facturas que ya enviaron su correo de aprobación)
     if not is_invoice:
         try:
-            send_general_status_email(document=document, extracted=clean_extracted)
+            send_general_status_email(document=document, extracted=clean_extracted, db=db)
         except Exception as mail_err:
             logger.warning("No se pudo enviar correo general para doc %s: %s", document.id, mail_err)

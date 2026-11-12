@@ -12,6 +12,8 @@ class Tenant(Base):
     name = Column(String(255), nullable=False)
     gmail_user = Column(String(255), nullable=True)
     gmail_app_password_enc = Column(Text, nullable=True)
+    telegram_bot_token_enc = Column(Text, nullable=True)
+    telegram_bot_username = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     users = relationship("User", back_populates="tenant")

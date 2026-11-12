@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   Building2, UserPlus, ShieldCheck, FolderLock, Users, FileText,
-  Trash2, LogOut, RefreshCw, CheckCircle2, AlertCircle, KeyRound, Crown, Plus, Mail
+  Trash2, LogOut, RefreshCw, CheckCircle2, AlertCircle, KeyRound, Crown, Plus, Mail, Bot
 } from 'lucide-react';
 import { superadminAPI, authAPI } from '../services/api';
 import brandLogo from '../assets/brand_logo.png';
@@ -17,6 +17,7 @@ export default function SuperAdminConsole({ onLogout }) {
   const [adminPassword, setAdminPassword] = useState('');
   const [gmailUser, setGmailUser] = useState('');
   const [gmailAppPassword, setGmailAppPassword] = useState('');
+  const [telegramBotToken, setTelegramBotToken] = useState('');
   const [createDefaultVacancy, setCreateDefaultVacancy] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState(null);
@@ -60,6 +61,7 @@ export default function SuperAdminConsole({ onLogout }) {
         admin_password: adminPassword.trim(),
         gmail_user: gmailUser.trim() || null,
         gmail_app_password: gmailAppPassword.trim() || null,
+        telegram_bot_token: telegramBotToken.trim() || null,
         create_default_vacancy: createDefaultVacancy
       });
       setFeedback({
@@ -77,6 +79,7 @@ export default function SuperAdminConsole({ onLogout }) {
       setAdminPassword('');
       setGmailUser('');
       setGmailAppPassword('');
+      setTelegramBotToken('');
       fetchTenants();
     } catch (err) {
       setFeedback({
@@ -317,7 +320,7 @@ export default function SuperAdminConsole({ onLogout }) {
 
                 <div className="pt-2 border-t border-slate-800 space-y-3">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                    <Mail className="w-3.5 h-3.5" /> Enlace Gmail al Repositorio (Opcional)
+                    <Mail className="w-3.5 h-3.5" /> Enlace Gmail y Bot Telegram (Opcional)
                   </p>
                   <input
                     type="email"
@@ -331,6 +334,13 @@ export default function SuperAdminConsole({ onLogout }) {
                     placeholder="Contraseña de Aplicación Google (16 letras)"
                     value={gmailAppPassword}
                     onChange={(e) => setGmailAppPassword(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Token de Bot Telegram @BotFather (o lo configura su Admin)"
+                    value={telegramBotToken}
+                    onChange={(e) => setTelegramBotToken(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
@@ -401,6 +411,14 @@ export default function SuperAdminConsole({ onLogout }) {
                           }`}>
                             <Mail className="w-3 h-3" />
                             {t.gmail_user ? `Gmail: ${t.gmail_user}` : 'Sin Gmail enlazado'}
+                          </span>
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                            t.telegram_linked
+                              ? 'bg-sky-950/70 text-sky-300 border-sky-700/60'
+                              : 'bg-slate-800 text-slate-400 border-slate-700'
+                          }`}>
+                            <Bot className="w-3 h-3" />
+                            {t.telegram_linked ? `Bot: ${t.telegram_bot_username || 'Activo'}` : 'Sin Bot Telegram'}
                           </span>
                         </p>
                       </div>

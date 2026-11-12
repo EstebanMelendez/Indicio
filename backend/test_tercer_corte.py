@@ -137,7 +137,7 @@ def test_08_multitenant_superadmin_and_company_admin_rbac():
     """
     Verifica:
     1) El control de acceso RBAC de require_role para 'superadmin', 'admin', 'auditor' y 'user'.
-    2) El cifrado de contraseña del Superusuario (AdminEstebanM@gmail.com / zoan2006).
+    2) El cifrado de contraseña del Superusuario (AdminEstebanM@gmail.com / superadmin123).
     3) Que un 'auditor' o 'user' reciba HTTP 403 al intentar acceder a la consola de Superusuario o a la pestaña de Usuarios de Admin.
     4) Validación estricta de campos: correo electrónico, longitud de contraseña (4 a 72 bytes) y sanitización anti-XSS en nombres de empresas/carpetas.
     """
@@ -147,8 +147,8 @@ def test_08_multitenant_superadmin_and_company_admin_rbac():
     from main import _validate_and_clean_email, _validate_password, _sanitize_entity_name
 
     # 1. Verificar hash y validación de credenciales del Superusuario
-    super_hash = get_password_hash("zoan2006")
-    assert verify_password("zoan2006", super_hash) is True
+    super_hash = get_password_hash("superadmin123")
+    assert verify_password("superadmin123", super_hash) is True
     assert verify_password("clave_incorrecta", super_hash) is False
 
     super_user = User(id=1, email="AdminEstebanM@gmail.com", role="superadmin", tenant_id=1)
@@ -180,7 +180,7 @@ def test_08_multitenant_superadmin_and_company_admin_rbac():
             _validate_and_clean_email(invalid_mail)
         assert exc_mail.value.status_code == 400
 
-    assert _validate_password("zoan2006") == "zoan2006"
+    assert _validate_password("superadmin123") == "superadmin123"
     for invalid_pwd in ("123", "x" * 80):
         with pytest.raises(HTTPException) as exc_pwd:
             _validate_password(invalid_pwd)
@@ -190,11 +190,19 @@ def test_08_multitenant_superadmin_and_company_admin_rbac():
     with pytest.raises(HTTPException):
         _sanitize_entity_name("A")
 
-    # 5. Verificar cifrado de Contraseña de Aplicación de Gmail por Empresa (Tenant)
+    # 5. Verificar cifrado de Contraseña de Aplicación de Gmail y Token de Bot de Telegram por Empresa (Tenant)
+    from telegram_bot_service import mask_bot_token
     enc_gmail = encrypt_sensitive_data({"app_password": "abcd efgh ijkl mnop".replace(" ", "")})
     assert enc_gmail.startswith("ENC::")
     dec_gmail = decrypt_sensitive_data(enc_gmail)
     assert dec_gmail["app_password"] == "abcdefghijklmnop"
+
+    sample_bot_token = "8123456789:AAH_test_bot_token_secret_xyz987"
+    enc_tg = encrypt_sensitive_data({"bot_token": sample_bot_token})
+    assert enc_tg.startswith("ENC::")
+    dec_tg = decrypt_sensitive_data(enc_tg)
+    assert dec_tg["bot_token"] == sample_bot_token
+    assert mask_bot_token(sample_bot_token) == "812345...z987"
 
 
 

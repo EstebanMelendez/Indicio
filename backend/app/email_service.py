@@ -265,14 +265,20 @@ def send_invoice_approval_email(db: Session, document: Document, extracted: Dict
     """
 
     t_cfg = get_tenant_gmail_config(db, document.tenant_id or 1)
-    res = send_html_email(
-        subject,
-        html_body,
-        to_email=t_cfg["notify_recipient"],
-        gmail_label="APROBACIONES PENDIENTES",
-        smtp_user=t_cfg["gmail_user"] if t_cfg["has_imap_credentials"] else None,
-        smtp_pass=t_cfg["gmail_app_password"] if t_cfg["has_imap_credentials"] else None
-    )
+    if not t_cfg["has_imap_credentials"]:
+        res = {
+            "sent": False,
+            "reason": f"La empresa '{t_cfg['tenant_name']}' aún no tiene un correo Gmail y Contraseña de Aplicación enlazados en 'Usuarios y Roles'."
+        }
+    else:
+        res = send_html_email(
+            subject,
+            html_body,
+            to_email=t_cfg["notify_recipient"],
+            gmail_label="APROBACIONES PENDIENTES",
+            smtp_user=t_cfg["gmail_user"],
+            smtp_pass=t_cfg["gmail_app_password"]
+        )
     duration_ms = int((time.time() - start_time) * 1000)
 
     try:
@@ -377,14 +383,20 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
     </div>
     """
     t_cfg = get_tenant_gmail_config(db, document.tenant_id or 1)
-    res = send_html_email(
-        subject,
-        html_body,
-        to_email=t_cfg["notify_recipient"],
-        gmail_label="HOJAS DE VIDA / RRHH",
-        smtp_user=t_cfg["gmail_user"] if t_cfg["has_imap_credentials"] else None,
-        smtp_pass=t_cfg["gmail_app_password"] if t_cfg["has_imap_credentials"] else None
-    )
+    if not t_cfg["has_imap_credentials"]:
+        res = {
+            "sent": False,
+            "reason": f"La empresa '{t_cfg['tenant_name']}' aún no tiene un correo Gmail y Contraseña de Aplicación enlazados en 'Usuarios y Roles'."
+        }
+    else:
+        res = send_html_email(
+            subject,
+            html_body,
+            to_email=t_cfg["notify_recipient"],
+            gmail_label="HOJAS DE VIDA / RRHH",
+            smtp_user=t_cfg["gmail_user"],
+            smtp_pass=t_cfg["gmail_app_password"]
+        )
     duration_ms = int((time.time() - start_time) * 1000)
 
     db.add(WorkflowAuditLog(
@@ -405,8 +417,8 @@ def execute_hr_scouting_workflow(db: Session, document: Document, extracted: Dic
     return res
 
 
-def send_general_status_email(document: Document, extracted: Dict[str, Any]) -> Dict[str, Any]:
-    """Envía el correo de notificación general cuando finaliza el procesamiento de un documento."""
+def send_general_status_email(document: Document, extracted: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
+    """Envía el correo de notificación general a la cuenta Gmail exclusiva de la empresa cuando finaliza el procesamiento."""
     subject = f"📄 Documento procesado en Indicio: {document.filename} ({document.status})"
     html_body = f"""
     <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">
@@ -421,6 +433,17 @@ def send_general_status_email(document: Document, extracted: Dict[str, Any]) -> 
         <p style="font-size:13px;color:#475569;background:#f8fafc;padding:12px;border-radius:8px;">{document.summary or ''}</p>
     </div>
     """
+    if db is not None:
+        t_cfg = get_tenant_gmail_config(db, document.tenant_id or 1)
+        if not t_cfg["has_imap_credentials"]:
+            return {"sent": False, "reason": "Empresa sin Gmail enlazado."}
+        return send_html_email(
+            subject,
+            html_body,
+            to_email=t_cfg["notify_recipient"],
+            smtp_user=t_cfg["gmail_user"],
+            smtp_pass=t_cfg["gmail_app_password"]
+        )
     return send_html_email(subject, html_body)
 
 

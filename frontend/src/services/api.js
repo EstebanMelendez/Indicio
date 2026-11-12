@@ -47,6 +47,8 @@ export const adminUsersAPI = {
   deleteUser: (userId) => api.delete(`/admin/users/${userId}`),
   getEmailConfig: () => api.get('/admin/email-config'),
   updateEmailConfig: (data) => api.put('/admin/email-config', data),
+  getTelegramConfig: () => api.get('/admin/telegram-config'),
+  updateTelegramConfig: (data) => api.put('/admin/telegram-config', data),
 };
 
 export const documentAPI = {
