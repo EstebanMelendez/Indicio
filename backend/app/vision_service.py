@@ -221,12 +221,13 @@ REGLAS ESTRICTAS:
     items_txt = "\n".join([
         f"- {i['cantidad']}x {i['descripcion']}: ${i['subtotal']:,.0f}" for i in cleaned_items
     ])
+    items_block = f"Ítems / Productos:\n{items_txt}\n\n" if items_txt else ""
     enriched_text = (
         f"DOCUMENTO PROCESADO POR VISIÓN POR COMPUTADOR ({filename}) - Categoría: {detected_category}\n"
         f"Resumen: {parsed.get('summary') or ''}\n"
         f"Emisor/Postulante: {extracted.get('emisor_nombre') or extracted.get('postulante') or extracted.get('partes') or 'N/A'} | NIT: {extracted.get('emisor_nit') or 'N/A'}\n"
         f"Monto/Valor: ${extracted.get('monto_total', 0):,.2f} {extracted.get('moneda', 'COP')} | Confianza Visual: {conf}%\n"
-        f"{('Ítems / Productos:\n' + items_txt + '\n\n') if items_txt else ''}"
+        f"{items_block}"
         f"Texto Transcrito:\n{ocr_text}"
     ).strip()
 
