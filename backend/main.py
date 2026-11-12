@@ -79,10 +79,13 @@ from sqlalchemy import text
 def startup_db_check():
     """Garantiza la consistencia automática del esquema de la base de datos al encender el backend"""
     try:
-        # Crea todas las tablas que no existan, incluyendo workflow_audit_logs
-        Base.metadata.create_all(bind=engine)
+        # 1. Habilitar extensión pgvector ANTES de crear tablas con columnas Vector(768)
         with engine.connect() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.commit()
+        # 2. Crea todas las tablas que no existan, incluyendo workflow_audit_logs
+        Base.metadata.create_all(bind=engine)
+        with engine.connect() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user';"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;"))
             conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);"))
@@ -90,6 +93,7 @@ def startup_db_check():
             conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gmail_app_password_enc TEXT;"))
             conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_bot_token_enc TEXT;"))
             conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_bot_username VARCHAR(255);"))
+            conn.execute(text("SELECT setval(pg_get_serial_sequence('tenants', 'id'), COALESCE((SELECT MAX(id) FROM tenants), 1));"))
             conn.commit()
         # Garantizar Tenant 1, usuarios semilla (admin, auditor, user, service) y protección Ley 1581
         from sqlalchemy.orm.attributes import flag_modified
